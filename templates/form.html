@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Eli Health ML Report Generator</title>
+<style>
+body { font-family: Arial, Helvetica, sans-serif; margin: 30px;}
+input, textarea { width: 100%; padding: 6px; margin-bottom: 14px;}
+label { font-weight: bold; }
+</style>
+</head>
+<body>
+<h2>Eli Health ML Report Generator</h2>
+<form action="/" method="post" enctype="multipart/form-data">
+    <label>Experiment Title:</label><input type="text" name="title" required>
+    <label>Authors:</label><input type="text" name="authors" value="Anthony Shin, Amber Birks, James Bausano" required>
+    <label>Affiliation:</label><input type="text" name="affiliation" value="Eli Health" required>
+    <label>Tags:</label><input type="text" name="tags" value="LFA, ML, Optimization" required>
+    <label>Experiment Type:</label><input type="text" name="exp_type" value="Lab Experiment" required>
+    <label>Hypothesis:</label><textarea name="hypothesis"></textarea>
+    <label>Abstract:</label><textarea name="abstract"></textarea>
+    <label>Introduction:</label><textarea name="introduction"></textarea>
+    <label>Methods & Materials:</label><textarea name="methods"></textarea>
+    <label>Results:</label><textarea name="results_text"></textarea>
+    <label>Discussion:</label><textarea name="discussion"></textarea>
+    <label>Conclusion:</label><textarea name="conclusion"></textarea>
+    <label>CSV Data File:</label><input type="file" name="file" accept=".csv" required>
+    <input type="submit" value="Generate Report">
+</form>
+</body>
+</html>
