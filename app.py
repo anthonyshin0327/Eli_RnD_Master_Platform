@@ -289,19 +289,27 @@ elif page == "Model & Metrics":
         fig = px.imshow(df[output_cols + ['composite_score']].corr(), text_auto=True)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Feature importances (Plotly)
+
+        # Feature importances (Plotly, descending order: most important at the top)
         importances = rf.feature_importances_
-        idx = np.argsort(importances)[::-1][:15]
+        idx = np.argsort(importances)[::-1][:15]  # Top 15 most important features
+        top_features = np.array(X.columns)[idx]
+        top_importances = importances[idx]
+
+        # DO NOT REVERSE here. Instead, order as-is and use autorange.
         fig = px.bar(
-            x=importances[idx],
-            y=np.array(X.columns)[idx],
+            x=top_importances, 
+            y=top_features,
             orientation='h',
             labels={'x':"Importance", 'y':"Feature"},
             title="Top 15 Feature Importances"
         )
+        fig.update_layout(yaxis=dict(autorange="reversed"))  # This will put most important at the top!
         st.plotly_chart(fig, use_container_width=True)
 
-# 4. Interpretability: SHAP + What-If
+
+
+# 4. Interpretability: SHAP + What-IF
 elif page == "Interpretability":
     st.title("🔎 Model Interpretability & What-If Simulator")
     # Check everything needed is in session_state
@@ -351,22 +359,55 @@ elif page == "Interpretability":
         # WHAT-IF SIMULATOR
         st.markdown("---")
         st.subheader("What-If Experiment Simulator 🧪")
-
         st.markdown("**Set your experimental parameters:**")
+
+        # --- Grouped expanders and columns for compact input UI ---
+        membrane_cols = [col for col in input_cols if "membrane" in col or "pad_material" in col or "detection_antibody_type" in col]
+        buffer_cols = [col for col in input_cols if "buffer" in col or "blocking" in col or "pH" in col]
+        vol_cols = [col for col in input_cols if "volume" in col or "width" in col or "length" in col or "density" in col]
+        other_cols = [col for col in input_cols if col not in membrane_cols + buffer_cols + vol_cols]
+
         user_inputs = {}
-        for col in input_cols:
-            if df[col].dtype == 'object':
-                user_inputs[col] = st.selectbox(
-                    f"{col.replace('_', ' ').capitalize()}",
-                    sorted(df[col].unique())
-                )
-            else:
-                user_inputs[col] = st.slider(
-                    f"{col.replace('_', ' ').capitalize()}",
-                    float(df[col].min()),
-                    float(df[col].max()),
-                    float(df[col].mean())
-                )
+
+        with st.expander("Membrane & Materials", expanded=True):
+            cols = st.columns(3)
+            for i, col in enumerate(membrane_cols):
+                c = cols[i % 3]
+                if df[col].dtype == 'object':
+                    user_inputs[col] = c.selectbox(f"{col.replace('_', ' ').capitalize()}", sorted(df[col].unique()))
+                else:
+                    user_inputs[col] = c.slider(f"{col.replace('_', ' ').capitalize()}",
+                                                float(df[col].min()), float(df[col].max()), float(df[col].mean()))
+
+        with st.expander("Buffers & Blocking", expanded=True):
+            cols = st.columns(3)
+            for i, col in enumerate(buffer_cols):
+                c = cols[i % 3]
+                if df[col].dtype == 'object':
+                    user_inputs[col] = c.selectbox(f"{col.replace('_', ' ').capitalize()}", sorted(df[col].unique()))
+                else:
+                    user_inputs[col] = c.slider(f"{col.replace('_', ' ').capitalize()}",
+                                                float(df[col].min()), float(df[col].max()), float(df[col].mean()))
+
+        with st.expander("Volumes & Dimensions", expanded=False):
+            cols = st.columns(3)
+            for i, col in enumerate(vol_cols):
+                c = cols[i % 3]
+                if df[col].dtype == 'object':
+                    user_inputs[col] = c.selectbox(f"{col.replace('_', ' ').capitalize()}", sorted(df[col].unique()))
+                else:
+                    user_inputs[col] = c.slider(f"{col.replace('_', ' ').capitalize()}",
+                                                float(df[col].min()), float(df[col].max()), float(df[col].mean()))
+
+        with st.expander("Other Parameters", expanded=False):
+            cols = st.columns(3)
+            for i, col in enumerate(other_cols):
+                c = cols[i % 3]
+                if df[col].dtype == 'object':
+                    user_inputs[col] = c.selectbox(f"{col.replace('_', ' ').capitalize()}", sorted(df[col].unique()))
+                else:
+                    user_inputs[col] = c.slider(f"{col.replace('_', ' ').capitalize()}",
+                                                float(df[col].min()), float(df[col].max()), float(df[col].mean()))
 
         # Prepare input row
         input_df = pd.DataFrame([user_inputs])
@@ -379,6 +420,8 @@ elif page == "Interpretability":
             X_eval = pd.concat([X_num_.reset_index(drop=True), X_cat_.reset_index(drop=True)], axis=1)
         else:
             X_eval = X_num_
+        # --- Align columns with X used for model training
+        X_eval = X_eval[X.columns]
 
         # Predict ALL outputs (not just composite)
         y_pred_all = rf.predict(X_eval)[0]
@@ -398,9 +441,7 @@ elif page == "Interpretability":
         col4.metric("CV", f"{result_dict['CV']:.2f}")
         col5.metric("Composite Score", f"{composite_sim:.3f}")
 
-        import pandas as pd
-
-        # 1. Which outputs are dragging the composite down?
+        # 🟢 NEW: Actionable suggestions
         metric_targets = {
             "IC50": "lower",
             "CV": "lower",
@@ -422,7 +463,7 @@ elif page == "Interpretability":
                 (metric_targets[m]=="lower" and norm_metrics[m]<threshold)):
                 suboptimal_msgs.append(m)
 
-        # 2. For each suboptimal output, suggest which direction to move which input
+        # Actionable: for each suboptimal output, suggest which direction to move which input
         for metric in suboptimal_msgs:
             rf_single = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=3)
             rf_single.fit(X, df[metric])
@@ -431,7 +472,7 @@ elif page == "Interpretability":
 
             dir_advice = []
             for feat in top_feats:
-                # Check if input feature is numeric (we can't suggest direction for categories)
+                # Only for numeric
                 if feat in df.columns and pd.api.types.is_numeric_dtype(df[feat]):
                     corr = df[feat].corr(df[metric])
                     if metric_targets[metric] == "lower":
@@ -447,13 +488,12 @@ elif page == "Interpretability":
                         else:
                             dir_advice.append(f"**decrease {feat.replace('_',' ')}**")
                 else:
-                    # For categorical or unknown, just say "adjust"
                     dir_advice.append(f"**adjust {feat.replace('_',' ')}**")
             advice_lines.append(f"To improve {metric}, {', and '.join(dir_advice)}.")
 
         if advice_lines:
             st.warning(f"⚠️ Suboptimal: {', '.join(suboptimal_msgs)} are dragging down the composite score.\n\n" +
-                    " ".join(advice_lines))
+                       " ".join(advice_lines))
         elif composite_sim > 0.8:
             st.success("🎉 **Excellent formulation!** This simulated experiment is predicted to have a high overall composite score.")
         elif composite_sim > 0.6:
@@ -462,8 +502,6 @@ elif page == "Interpretability":
             st.warning("⚠️ **Suboptimal:** Some metrics are dragging down the composite score. Try adjusting parameters.")
         else:
             st.error("❌ **Poor result:** This simulated experiment is predicted to be low-performing. Try optimizing IC50 and CV.")
-
-
 
         # Radar/spider plot for outputs (optional, but recommended!)
         import plotly.graph_objects as go
@@ -489,8 +527,325 @@ elif page == "Interpretability":
 
 # 5. Experiment Suggestions
 elif page == "Suggest Experiments":
-    st.title("🧬 Experiment Suggestions (Bayesian Optimization)")
-    st.write("🚧 _Under construction!_ (Let me know if you want this fully built out right now)")
+    st.title("🧬 Experiment Suggestions & Strategy Center")
+    if (
+        'df' not in st.session_state or
+        'rf' not in st.session_state or
+        'encoder' not in st.session_state or
+        'input_cols' not in st.session_state or
+        'categorical_cols' not in st.session_state
+    ):
+        st.error("Please load data and train the model first in 'Model & Metrics' tab!")
+    else:
+        import matplotlib.pyplot as plt
+        from sklearn.tree import DecisionTreeRegressor, plot_tree
+        from skopt import gp_minimize
+        from skopt.space import Real
+
+        df = st.session_state['df']
+        rf = st.session_state['rf']
+        encoder = st.session_state['encoder']
+        input_cols = st.session_state['input_cols']
+        categorical_cols = st.session_state['categorical_cols']
+        output_cols = ['IC50', 'slope', 'line_intensity', 'CV']
+        perf_cols = ['composite_score', 'IC50', 'slope', 'line_intensity', 'CV']
+
+        st.header("🌳 Surrogate Decision Tree (Strategy Map)")
+        # Train surrogate tree on composite score prediction
+        X_num = df[input_cols].select_dtypes(include=[np.number])
+        if categorical_cols:
+            X_cat = pd.DataFrame(
+                encoder.transform(df[categorical_cols]),
+                columns=encoder.get_feature_names_out(categorical_cols)
+            )
+            X = pd.concat([X_num.reset_index(drop=True), X_cat.reset_index(drop=True)], axis=1)
+        else:
+            X = X_num
+        y = df['composite_score']
+
+        surrogate = DecisionTreeRegressor(max_depth=3, random_state=42)
+        y_rf_pred = rf.predict(X)[:, 4] if rf.n_outputs_ > 1 else rf.predict(X)
+        surrogate.fit(X, y_rf_pred)
+        fig, ax = plt.subplots(figsize=(14, 6))
+        plot_tree(surrogate, feature_names=X.columns, filled=True, max_depth=3, fontsize=10, ax=ax)
+        st.pyplot(fig)
+
+        st.markdown("> **Interpretation:** The surrogate tree shows the main decision 'rules' for maximizing composite score. Follow branches with higher leaf predictions to design better experiments.")
+
+        # Extract and summarize "winning" paths
+        st.markdown("#### 🏆 Top Strategies from Tree:")
+        from collections import Counter
+        tree = surrogate.tree_
+        features = np.array(X.columns)
+        def extract_paths(tree, features, node=0, cur_path=[], paths=[]):
+            if tree.children_left[node] == tree.children_right[node]:  # leaf
+                paths.append((list(cur_path), tree.value[node][0][0]))
+            else:
+                f = features[tree.feature[node]]
+                t = tree.threshold[node]
+                extract_paths(tree, features, tree.children_left[node], cur_path+[(f, "<=", t)], paths)
+                extract_paths(tree, features, tree.children_right[node], cur_path+[(f, ">", t)], paths)
+            return paths
+        all_paths = extract_paths(tree, features)
+        top_paths = sorted(all_paths, key=lambda x: -x[1])[:3]
+        for i, (conditions, val) in enumerate(top_paths, 1):
+            cond_str = " and ".join([f"{f} {op} {t:.2f}" for f, op, t in conditions])
+            st.markdown(f"**{i}.** If {cond_str}, predicted composite score ≈ **{val:.3f}**")
+
+        st.divider()
+
+        # --- Bayesian Optimization for Top Suggestions ---
+        st.header("🤖 Bayesian Optimization: Top 10 Experiment Suggestions")
+        from skopt.space import Real
+        space = []
+        for col in input_cols:
+            if df[col].dtype == 'object':
+                space.append(Real(0, df[col].nunique() - 1, name=col))
+            else:
+                space.append(Real(float(df[col].min()), float(df[col].max()), name=col))
+        def decode_x(x):
+            vals = []
+            idx = 0
+            for col in input_cols:
+                if df[col].dtype == 'object':
+                    cats = df[col].unique()
+                    vals.append(cats[int(np.round(x[idx]))])
+                else:
+                    vals.append(x[idx])
+                idx += 1
+            return vals
+        mins = df[output_cols].min().values
+        maxs = df[output_cols].max().values
+        def objective(x):
+            vals = decode_x(x)
+            x_dict = {col: val for col, val in zip(input_cols, vals)}
+            x_df = pd.DataFrame([x_dict])
+            X_num_ = x_df.select_dtypes(include=[np.number])
+            if categorical_cols:
+                X_cat_ = pd.DataFrame(
+                    encoder.transform(x_df[categorical_cols]),
+                    columns=encoder.get_feature_names_out(categorical_cols)
+                )
+                X_eval = pd.concat([X_num_.reset_index(drop=True), X_cat_.reset_index(drop=True)], axis=1)
+            else:
+                X_eval = X_num_
+            X_eval = X_eval[X.columns]
+            pred = rf.predict(X_eval)[0]
+            norm = (pred[:4] - mins) / (maxs - mins + 1e-9)
+            score_ic50 = 1 - norm[0]
+            score_cv = 1 - norm[3]
+            score_slope = norm[1]
+            score_intensity = norm[2]
+            composite = (score_ic50 + score_cv + score_slope + score_intensity) / 4
+            return -composite
+
+        res = gp_minimize(objective, space, n_calls=40, random_state=42)
+        all_params = [decode_x(x) for x in res.x_iters]
+        bo_df = pd.DataFrame(all_params, columns=input_cols)
+        all_outputs = []
+        for params in all_params:
+            x_dict = {col: val for col, val in zip(input_cols, params)}
+            x_df = pd.DataFrame([x_dict])
+            X_num_ = x_df.select_dtypes(include=[np.number])
+            if categorical_cols:
+                X_cat_ = pd.DataFrame(
+                    encoder.transform(x_df[categorical_cols]),
+                    columns=encoder.get_feature_names_out(categorical_cols)
+                )
+                X_eval = pd.concat([X_num_.reset_index(drop=True), X_cat_.reset_index(drop=True)], axis=1)
+            else:
+                X_eval = X_num_
+            X_eval = X_eval[X.columns]
+            pred = rf.predict(X_eval)[0]
+            all_outputs.append(pred)
+        all_outputs = np.array(all_outputs)
+        for i, col in enumerate(output_cols):
+            bo_df[col] = all_outputs[:, i]
+        norm_outputs = (all_outputs[:, :4] - mins) / (maxs - mins + 1e-9)
+        composite_score = ((1 - norm_outputs[:,0]) + (1 - norm_outputs[:,3]) + norm_outputs[:,1] + norm_outputs[:,2]) / 4
+        bo_df['composite_score'] = composite_score
+        bo_top10 = bo_df.sort_values('composite_score', ascending=False).head(10)
+        st.dataframe(bo_top10, use_container_width=True)
+        st.download_button("Download Top 10 Suggestions (CSV)", bo_top10.to_csv(index=False), "top10_experiments.csv", "text/csv")
+
+        # --- 2D Exploration/Exploitation Map ---
+        st.header("🗺️ Exploration Map: Suggestions vs. Previous Experiments")
+        st.markdown("Visualize where suggestions land vs. all your previous data points. Are you exploring new territory?")
+        numeric_inputs = [col for col in input_cols if pd.api.types.is_numeric_dtype(df[col])]
+        x_axis = st.selectbox("X axis", numeric_inputs, index=0)
+        y_axis = st.selectbox("Y axis", numeric_inputs, index=1 if len(numeric_inputs)>1 else 0)
+        fig2 = px.scatter(df, x=x_axis, y=y_axis, color="composite_score", opacity=0.45, title="All Past Experiments")
+        fig2.add_scatter(x=bo_top10[x_axis], y=bo_top10[y_axis], mode="markers", marker=dict(size=16, color="red", symbol="star"), name="Suggestions")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        # --- Local SHAP Force Plot for Each Suggestion + Plain-English Interpretation + Action Table ---
+        st.header("🔬 Inspect a Suggested Experiment")
+        sel_idx = st.selectbox("Choose a suggestion to analyze", list(bo_top10.index))
+        selected_row = bo_top10.loc[sel_idx]
+        st.write("**Parameters:**")
+        st.write(selected_row[input_cols])
+
+        try:
+            import shap
+            x_dict = {col: selected_row[col] for col in input_cols}
+            x_df = pd.DataFrame([x_dict])
+            X_num_ = x_df.select_dtypes(include=[np.number])
+            if categorical_cols:
+                X_cat_ = pd.DataFrame(
+                    encoder.transform(x_df[categorical_cols]),
+                    columns=encoder.get_feature_names_out(categorical_cols)
+                )
+                X_eval = pd.concat([X_num_.reset_index(drop=True), X_cat_.reset_index(drop=True)], axis=1)
+            else:
+                X_eval = X_num_
+            X_eval = X_eval[X.columns]
+            rf_single = RandomForestRegressor(n_estimators=100, random_state=42, max_depth=3)
+            rf_single.fit(X, df['composite_score'])
+            explainer = shap.TreeExplainer(rf_single)
+            shap_values = explainer.shap_values(X_eval)
+            st.markdown("**SHAP Force Plot for Composite Score**")
+            st_shap = st.container()
+            shap.initjs()
+            st_shap.pyplot(shap.force_plot(explainer.expected_value, shap_values, X_eval, matplotlib=True, show=False))
+
+            # --- Human-readable interpretation ---
+            st.markdown("""
+<div style="background:#F4FAFF;padding:16px 22px 8px 22px;border-radius:12px;font-size:1.07em">
+<b>How to interpret this plot?</b><br>
+- <span style="color:#C23C2A"><b>Red bars</b></span>: These input values are decreasing your composite score. The longer the bar, the bigger the negative impact. <br>
+- <span style="color:#2494CE"><b>Blue bars</b></span>: These input values are increasing your composite score. <br>
+- <b>Base value</b>: Model’s typical composite score before your settings are applied.<br>
+- <b>f(x)</b>: Predicted composite score for your suggested experiment.<br>
+<br>
+<strong>Tip:</strong> Try decreasing the features in red (if possible), or increasing those in blue, to improve your next experiment!
+</div>
+""", unsafe_allow_html=True)
+
+            # Table: top 5 most impactful features, effect, recommendation
+            feature_effects = []
+            shap_arr = shap_values[0] if isinstance(shap_values, (list, tuple, np.ndarray)) and len(np.shape(shap_values)) > 1 else shap_values
+            for i, feat in enumerate(X_eval.columns):
+                val = X_eval.iloc[0, i]
+                shap_val = shap_arr[i]
+                if shap_val > 0:
+                    eff = "↑"
+                    rec = "Increase" if pd.api.types.is_numeric_dtype(X_eval[feat]) else "Try changing"
+                else:
+                    eff = "↓"
+                    rec = "Decrease" if pd.api.types.is_numeric_dtype(X_eval[feat]) else "Try changing"
+                feature_effects.append({
+                    "Feature": feat,
+                    "Value": round(val,3) if isinstance(val, float) else val,
+                    "Effect": eff * int(np.ceil(abs(shap_val) / (np.max(np.abs(shap_arr))+1e-8)*3)),  # strength
+                    "Recommendation": f"{rec} {feat.replace('_',' ')}"
+                })
+            feature_effects = sorted(feature_effects, key=lambda d: -abs(shap_arr[X_eval.columns.get_loc(d['Feature'])]))[:5]
+            st.markdown("#### 🔎 Most Impactful Factors & Recommendations")
+            st.dataframe(pd.DataFrame(feature_effects), use_container_width=True)
+
+            # Text suggestion for next adjustment
+            top_down = [d for d in feature_effects if d["Effect"].startswith("↓")]
+            top_up = [d for d in feature_effects if d["Effect"].startswith("↑")]
+            suggest_txt = ""
+            if top_down:
+                suggest_txt += "To further improve this experiment, try decreasing "
+                suggest_txt += ", ".join(f["Feature"].replace('_',' ') for f in top_down[:2])
+                suggest_txt += ". "
+            if top_up:
+                suggest_txt += "Also, increasing "
+                suggest_txt += ", ".join(f["Feature"].replace('_',' ') for f in top_up[:2])
+                suggest_txt += " may help boost your score."
+            if suggest_txt:
+                st.info(suggest_txt)
+
+
+            # --- Comparison Report ---
+            st.header("📊 Comparison Report: Expected Improvement")
+
+            best_idx = df['composite_score'].idxmax()
+            best_row = df.loc[best_idx]
+            selected_outputs = selected_row[perf_cols]
+            best_outputs = best_row[perf_cols]
+            mean_outputs = df[perf_cols].mean()
+
+            def pct_change(new, old, higher_is_better=True):
+                if higher_is_better:
+                    pct = 100*(new-old)/abs(old) if abs(old) > 1e-6 else 0
+                else:
+                    pct = 100*(old-new)/abs(old) if abs(old) > 1e-6 else 0
+                return pct
+
+            direction_map = {
+                "composite_score": True,
+                "IC50": False,
+                "CV": False,
+                "slope": True,
+                "line_intensity": True
+            }
+
+            def format_pct(val):
+                color = "#36B37E" if val > 0 else "#C23C2A"
+                sign = "+" if val > 0 else ""
+                return f"<span style='color:{color};font-weight:bold'>{sign}{val:.1f}%</span>"
+
+            summary_rows = []
+            for m in perf_cols:
+                new = selected_outputs[m]
+                best = best_outputs[m]
+                avg = mean_outputs[m]
+                dir_better = direction_map[m]
+                vs_best = pct_change(new, best, higher_is_better=dir_better)
+                vs_avg = pct_change(new, avg, higher_is_better=dir_better)
+                summary_rows.append({
+                    "Metric": m.replace('_', ' ').capitalize(),
+                    "Predicted": round(new,3),
+                    "Best (so far)": round(best,3),
+                    "Avg (so far)": round(avg,3),
+                    "Vs. Best": format_pct(vs_best),
+                    "Vs. Avg": format_pct(vs_avg),
+                    "Direction": "↑ better" if dir_better else "↓ better"
+                })
+
+            st.markdown("**How will this experiment compare to your previous best and average results?**")
+
+            st.write("All changes (%) are relative improvements (higher = better if green, lower = better if red).")
+            st.markdown(pd.DataFrame(summary_rows).to_html(escape=False, index=False), unsafe_allow_html=True)
+
+            # Natural language summary
+            n_improve = sum("color:#36B37E" in row["Vs. Best"] for row in summary_rows)
+            n_decline = len(summary_rows) - n_improve
+            if n_improve > 0:
+                st.success(f"This experiment is predicted to improve **{n_improve}** out of **{len(summary_rows)}** key outputs compared to your historical best.")
+            if n_decline > 0:
+                st.warning(f"Note: For **{n_decline}** outputs, this experiment is predicted to be lower than your current best. Consider further optimization!")
+
+
+
+
+
+
+
+
+        except Exception as e:
+            st.info("SHAP force plot not available here due to technical limitations, but see model interpretability tab for global insights.")
+
+        # --- Strategy Summary ---
+        st.header("📝 Strategy Summary")
+        path_feats = []
+        for conds, val in top_paths:
+            for f, op, t in conds:
+                path_feats.append(f)
+        most_common = Counter(path_feats).most_common(2)
+        feat_str = ', '.join([f"{k} (split {v} times)" for k,v in most_common])
+        st.success(
+            f"**Summary:** High composite scores are usually found when these features are optimized: **{feat_str}**. "
+            "Next, run experiments near the top 10 suggestions and follow the main tree splits above!"
+        )
+
+
+
+
+
 
 # 6. Download & Reports
 elif page == "Download":
