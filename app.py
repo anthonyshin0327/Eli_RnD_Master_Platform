@@ -184,9 +184,8 @@ for key in MODEL_EXPLANATIONS.keys():
         })
 
 
-def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges=None):
+def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges_from_ui=None): # Renamed feature_ranges to feature_ranges_from_ui for clarity
     print(f"Starting AutoML pipeline for {analysis_type} analysis on target: {target_column}")
-    # Initialize all return values to ensure function signature is met even if errors occur early
     all_model_results = []
     best_model_info_dict = {} 
     importances_df = pd.DataFrame()
@@ -194,7 +193,6 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
     actual_vs_predicted_fig = go.Figure()
     residuals_vs_predicted_fig = go.Figure()
     
-    # Optimization specific return values
     optimal_settings = {}
     predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan
     response_surface_fig = {}
@@ -202,7 +200,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
     model_info_summary = {}
     surrogate_tree_plot_src = None
 
-    current_progress_steps = [f"Validating Inputs & Data..."] # Start with a validation step
+    current_progress_steps = [f"Validating Inputs & Data..."]
     current_progress_steps.append(f"Preprocessing Data...")
     current_progress_steps.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
     current_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model..."])
@@ -213,12 +211,12 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         current_progress_steps.extend(optimization_specific_steps)
     current_progress_steps.append("Finalizing Results...")
     
-    progress_callback(current_progress_steps, 0) # Initial call with all defined steps
+    progress_callback(current_progress_steps, 0) 
 
     try:
         if data_df is None or data_df.empty: raise ValueError("Input data is empty.")
         if not target_column or not feature_columns: raise ValueError("Target column or feature columns not specified.")
-        progress_callback(current_progress_steps, 0) # Validating Inputs
+        progress_callback(current_progress_steps, 0) 
 
         best_r2 = -float('inf') 
         total_models = len(MODELS_TO_EVALUATE)
@@ -246,7 +244,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
 
         base_preprocessor = create_preprocessing_pipeline(numerical_features, categorical_features, imputer_strategy_for_pipeline if missing_value_strategy != 'drop_rows' else None)
         
-        progress_callback(current_progress_steps, 1) # "Preprocessing Data..."
+        progress_callback(current_progress_steps, 1) 
         X_train_processed = base_preprocessor.fit_transform(X_train)
         X_test_processed = base_preprocessor.transform(X_test)
         
@@ -324,21 +322,28 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         current_progress_idx_offset = 2 + total_models 
         progress_callback(current_progress_steps, current_progress_idx_offset) 
         
-        if best_model_pipeline_obj and not X_train_processed_df.empty and best_model_info_dict:
+        if best_model_pipeline_obj and not X_train_processed_df.empty and best_model_info_dict: 
             best_regressor = best_model_pipeline_obj.named_steps['regressor']
             y_pred_best_model_test = best_regressor.predict(X_test_processed_df)
             
             try:
-                actual_vs_predicted_fig = px.scatter(x=y_test, y=y_pred_best_model_test, labels={'x': 'Actual Values', 'y': 'Predicted Values'}, title=f'Actual vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
-                actual_vs_predicted_fig.add_trace(go.Scatter(x=[min(y_test.min(), y_pred_best_model_test.min()), max(y_test.max(), y_pred_best_model_test.max())], y=[min(y_test.min(), y_pred_best_model_test.min()), max(y_test.max(), y_pred_best_model_test.max())], mode='lines', name='Ideal Fit', line=dict(dash='dash', color='grey')))
-                actual_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
+                min_val = min(y_test.min(), y_pred_best_model_test.min()) if len(y_test) > 0 and len(y_pred_best_model_test) > 0 else 0
+                max_val = max(y_test.max(), y_pred_best_model_test.max()) if len(y_test) > 0 and len(y_pred_best_model_test) > 0 else 1
+                actual_vs_predicted_fig = px.scatter(x=y_test, y=y_pred_best_model_test, 
+                                                     labels={'x': 'Actual Values', 'y': 'Predicted Values'}, 
+                                                     title=f'Actual vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                actual_vs_predicted_fig.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val], 
+                                                             mode='lines', name='Ideal Fit', line=dict(dash='dash', color='grey')))
+                actual_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
             except Exception as e_avp: print(f"Error Actual vs Predicted plot: {e_avp}")
 
             try:
                 residuals = y_test - y_pred_best_model_test
-                residuals_vs_predicted_fig = px.scatter(x=y_pred_best_model_test, y=residuals, labels={'x': 'Predicted Values', 'y': 'Residuals'}, title=f'Residuals vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                residuals_vs_predicted_fig = px.scatter(x=y_pred_best_model_test, y=residuals, 
+                                                        labels={'x': 'Predicted Values', 'y': 'Residuals'}, 
+                                                        title=f'Residuals vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
                 residuals_vs_predicted_fig.add_hline(y=0, line_dash="dash", line_color="grey")
-                residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
+                residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
             except Exception as e_resid: print(f"Error Residuals plot: {e_resid}")
 
             progress_callback(current_progress_steps, current_progress_idx_offset + 1) 
@@ -384,17 +389,44 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 try:
                     interpretable_tree.fit(X_train_processed_df, y_hat_train_surrogate) 
                     surrogate_tree_text = export_text(interpretable_tree, feature_names=X_train_processed_df.columns.tolist())
-                    fig_tree, ax_tree = plt.subplots(figsize=(min(20, 3*len(X_train_processed_df.columns)),10), dpi=100)
-                    plot_tree(interpretable_tree, feature_names=X_train_processed_df.columns.tolist(), filled=True, rounded=True, fontsize=min(9, 100/len(X_train_processed_df.columns) if len(X_train_processed_df.columns)>0 else 9), ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
-                    plt.title("Surrogate Decision Tree", fontsize=12); img_buffer = io.BytesIO(); fig_tree.savefig(img_buffer, format="png", bbox_inches="tight"); plt.close(fig_tree)
-                    img_buffer.seek(0); img_base64 = base64.b64encode(img_buffer.read()).decode(); surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
-                except Exception as e_tree_plot: print(f"Error surrogate tree plot: {e_tree_plot}")
+                    if interpretable_tree.tree_.node_count > 1: 
+                        # Ensure fontsize is an integer
+                        font_size_tree = int(min(9, 100/len(X_train_processed_df.columns) if len(X_train_processed_df.columns)>0 else 9))
+                        fig_tree, ax_tree = plt.subplots(figsize=(min(20, 3*len(X_train_processed_df.columns) if len(X_train_processed_df.columns) > 0 else 10),10), dpi=100) 
+                        plot_tree(interpretable_tree, feature_names=X_train_processed_df.columns.tolist(), filled=True, rounded=True, fontsize=font_size_tree, ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
+                        plt.title("Surrogate Decision Tree (Approximating Best Model's Logic)", fontsize=12); img_buffer = io.BytesIO(); fig_tree.savefig(img_buffer, format="png", bbox_inches="tight"); plt.close(fig_tree)
+                        img_buffer.seek(0); img_base64 = base64.b64encode(img_buffer.read()).decode(); surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
+                    else:
+                        surrogate_tree_text = "Surrogate tree is too simple to visualize (e.g., only a root node). This can happen if the model's predictions are nearly constant or no meaningful splits are found at max_depth=3."
+                        surrogate_tree_plot_src = None
+                except Exception as e_tree_plot: 
+                    print(f"Error surrogate tree plot: {e_tree_plot}")
+                    surrogate_tree_text = f"Error generating surrogate tree visual: {str(e_tree_plot)}. Textual representation may still be available."
+                    surrogate_tree_plot_src = None 
             
             current_progress_idx_offset +=1 
             progress_callback(current_progress_steps, current_progress_idx_offset) 
             optimal_settings = {col: "N/A" for col in feature_columns} 
 
-            grid_points_num_orig = {col: np.linspace(feature_ranges[col]['min'], feature_ranges[col]['max'], 5) for col in numerical_features if col in feature_ranges and feature_ranges[col]['min'] != feature_ranges[col]['max']}
+            # Define feature_ranges for optimization, including 10% extrapolation for numerical features
+            opt_feature_ranges = {}
+            for col in numerical_features:
+                if col in feature_ranges_from_ui and feature_ranges_from_ui[col]['min'] != feature_ranges_from_ui[col]['max']:
+                    original_min = feature_ranges_from_ui[col]['min']
+                    original_max = feature_ranges_from_ui[col]['max']
+                    range_span = original_max - original_min
+                    extrapolation_amount = range_span * 0.10 # 10% extrapolation
+                    
+                    opt_feature_ranges[col] = {
+                        'min': original_min - extrapolation_amount,
+                        'max': original_max + extrapolation_amount
+                    }
+                elif col in data_df.columns: # Fallback if not in UI ranges but exists in data
+                     opt_feature_ranges[col] = {'min': data_df[col].min(), 'max': data_df[col].max()}
+
+
+            grid_points_num_orig = {col: np.linspace(opt_feature_ranges[col]['min'], opt_feature_ranges[col]['max'], 7) # Increased points for finer grid
+                                    for col in numerical_features if col in opt_feature_ranges and opt_feature_ranges[col]['min'] != opt_feature_ranges[col]['max']}
             grid_points_cat_orig = {col: data_df[col].unique().tolist() for col in categorical_features}
             iterables_for_product_orig = []
             for col in feature_columns:
@@ -432,10 +464,12 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             
             try:
                 varied_numerical_features_for_plot_orig = [col for col in numerical_features if col in feature_columns and col in grid_points_num_orig and len(grid_points_num_orig[col]) > 1]
-                plot_points_surface = 15
+                plot_points_surface = 15 # Number of points for each axis in surface plot
                 if len(varied_numerical_features_for_plot_orig) >= 2:
                     x_f, y_f = varied_numerical_features_for_plot_orig[0], varied_numerical_features_for_plot_orig[1]
-                    x_r, y_r = np.linspace(feature_ranges[x_f]['min'], feature_ranges[x_f]['max'], plot_points_surface), np.linspace(feature_ranges[y_f]['min'], feature_ranges[y_f]['max'], plot_points_surface)
+                    # Use the extrapolated ranges for plotting as well
+                    x_r = np.linspace(opt_feature_ranges[x_f]['min'], opt_feature_ranges[x_f]['max'], plot_points_surface)
+                    y_r = np.linspace(opt_feature_ranges[y_f]['min'], opt_feature_ranges[y_f]['max'], plot_points_surface)
                     X_g, Y_g = np.meshgrid(x_r, y_r); p_list = []
                     for i0 in range(X_g.shape[0]):
                         for j0 in range(X_g.shape[1]):
@@ -447,9 +481,11 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     if not p_df_s.empty:
                         p_df_s_proc = base_preprocessor.transform(p_df_s); p_df_s_proc = pd.DataFrame(p_df_s_proc, columns=feature_names_out)
                         Z_g_flat = best_model_pipeline_obj.named_steps['regressor'].predict(p_df_s_proc); Z_g = Z_g_flat.reshape(X_g.shape)
-                        response_surface_fig = {'data': [go.Contour(x=x_r, y=y_r, z=Z_g, colorscale='Viridis', contours_coloring='heatmap', colorbar_title=target_column)], 'layout': {'title': f'Response Surface for {target_column}', 'xaxis': {'title': x_f}, 'yaxis': {'title': y_f}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}}
+                        response_surface_fig = {'data': [go.Contour(x=x_r, y=y_r, z=Z_g, colorscale='Viridis', contours_coloring='heatmap', colorbar_title=target_column)], 
+                                                'layout': {'title': f'Predicted Response Surface: {target_column} vs {x_f} & {y_f}', 'xaxis_title': x_f, 'yaxis_title': y_f, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'title_x':0.5}}
                 elif len(varied_numerical_features_for_plot_orig) == 1:
-                    x_f1 = varied_numerical_features_for_plot_orig[0]; x_r1 = np.linspace(feature_ranges[x_f1]['min'], feature_ranges[x_f1]['max'], plot_points_surface * 2); p_r1 = []
+                    x_f1 = varied_numerical_features_for_plot_orig[0]; 
+                    x_r1 = np.linspace(opt_feature_ranges[x_f1]['min'], opt_feature_ranges[x_f1]['max'], plot_points_surface * 2); p_r1 = []
                     for vx1 in x_r1:
                         r1 = {x_f1: vx1}
                         for cf in feature_columns:
@@ -459,7 +495,8 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     if not p_df1.empty:
                         p_df1_proc = base_preprocessor.transform(p_df1); p_df1_proc = pd.DataFrame(p_df1_proc, columns=feature_names_out)
                         y_pv = best_model_pipeline_obj.named_steps['regressor'].predict(p_df1_proc)
-                        response_surface_fig = {'data': [go.Scatter(x=x_r1, y=y_pv, mode='lines', line_color='#28a745')], 'layout': {'title': f'Response: {target_column} vs {x_f1}', 'xaxis': {'title': x_f1}, 'yaxis': {'title': target_column}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}}
+                        response_surface_fig = {'data': [go.Scatter(x=x_r1, y=y_pv, mode='lines', line_color='#28a745')], 
+                                                'layout': {'title': f'Predicted Response: {target_column} vs {x_f1}', 'xaxis_title': x_f1, 'yaxis_title': target_column, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'title_x':0.5}}
             except Exception as e_resp_surf: print(f"Error response surface plot: {e_resp_surf}")
 
             current_progress_idx_offset +=1
@@ -503,7 +540,7 @@ def run_exploration_automl(data_df, target_column, feature_columns, missing_valu
 def run_optimization_automl(data_df, target_column, feature_columns, optimization_goal, feature_ranges, missing_value_strategy, progress_callback):
     return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy,
                                  progress_callback, 'optimization',
-                                 optimization_goal=optimization_goal, feature_ranges=feature_ranges)
+                                 optimization_goal=optimization_goal, feature_ranges_from_ui=feature_ranges) # Pass feature_ranges as feature_ranges_from_ui
 
 
 def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition=""):
@@ -544,8 +581,8 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
     4.  Guidance on interpreting the 'Actual vs. Predicted' and 'Residuals vs. Predicted' plots. What should a scientist look for in these plots to assess model performance and trustworthiness?
     5.  If '{analysis_type}' is 'Optimization':
         a.  Explain the role of the surrogate model ('{best_model_name}') in the optimization process.
-        b.  Interpret the suggested optimal settings and the predicted target value at these settings, including any confidence intervals.
-        c.  Explain how the surrogate decision tree (if provided) and response surface plots help in understanding the optimization landscape.
+        b.  Interpret the suggested optimal settings and the predicted target value at these settings, including any confidence intervals. The optimal settings are derived from the surrogate model's predictions over an extended grid which may include extrapolated values (e.g., +/- 10% beyond original data range for numerical features).
+        c.  Explain how the surrogate decision tree (if provided, or its textual representation) and response surface plots help in understanding the optimization landscape. Clarify that the visual tree might not always be generated due to complexity or data characteristics (e.g., a very simple tree with few splits, or rendering issues with many features), in which case the textual rules are provided as an alternative.
     6.  Provide clear, actionable insights and next steps for the scientist based on these results. What should they investigate further or try in the lab?
 
     Focus on clarity, practical implications, and scientific relevance.
@@ -610,12 +647,24 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
         
         imp_opt_df = pd.DataFrame(results_data.get('importances', []))
         top_shap_opt = ", ".join(imp_opt_df.head(3)['feature'].tolist()) if not imp_opt_df.empty else "N/A"
+        
+        surrogate_tree_explanation = "The visual surrogate decision tree (if provided) offers a simplified approximation of the model's logic. "
+        if not results_data.get('surrogate_tree_plot_src') and results_data.get('surrogate_tree_text', ''): 
+            if results_data.get('surrogate_tree_text', '').startswith('|-') or "Surrogate tree is too simple to visualize" in results_data.get('surrogate_tree_text', ''):
+                 surrogate_tree_explanation += "In this case, a visual plot could not be generated (often due to tree complexity with many features or very simple tree structures after pruning to max_depth=3). Instead, the textual representation of the tree's rules is provided, showing key decision paths based on (transformed) feature values."
+            else: 
+                 surrogate_tree_explanation += "The surrogate tree information was not successfully generated for this run. The textual output may contain an error message or indicate it was not applicable."
+        elif results_data.get('surrogate_tree_plot_src'):
+             surrogate_tree_explanation += "It highlights key decision paths based on (transformed) feature values."
+        else: 
+            surrogate_tree_explanation += "The surrogate tree was not generated or available for this run."
+
 
         return f"""
         #### **Advanced Optimization Analysis: Pinpointing Optimal Experimental Conditions**
 
         **Objective & Methodology:**
-        The aim of this Optimization Analysis was to identify experimental settings that **{goal_v}** your target variable: '{results_data.get('target_column', 'N/A')}'. This was achieved by first selecting a high-performing surrogate model, the **{s_name}** (R²: {s_r2:.3f} during its initial evaluation), to represent the complex relationships in your data. This surrogate model, chosen for its predictive accuracy ({s_props.get('description', 'It is a robust modeling technique.')}), then enabled an efficient search across a grid of possible input parameter combinations. This in-silico experimentation predicts outcomes without the immediate need for extensive lab work.
+        The aim of this Optimization Analysis was to identify experimental settings that **{goal_v}** your target variable: '{results_data.get('target_column', 'N/A')}'. This was achieved by first selecting a high-performing surrogate model, the **{s_name}** (R²: {s_r2:.3f} during its initial evaluation), to represent the complex relationships in your data. This surrogate model, chosen for its predictive accuracy ({s_props.get('description', 'It is a robust modeling technique.')}), then enabled an efficient search across a grid of possible input parameter combinations. This *in-silico* experimentation, which may explore values slightly beyond your original data's range (e.g., +/- 10% for numerical features), predicts outcomes to guide lab work.
 
         **Suggested Optimal Settings & Predicted Outcome:**
         * **Optimal Conditions:** {opt_str}
@@ -625,8 +674,8 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
         **Interpreting Surrogate Model Insights & Visualizations:**
         * **Surrogate Model ({s_name}):** This model's performance (Actual vs. Predicted, Residuals plots shown for its evaluation run) gives confidence in its ability to guide the optimization.
         * **SHAP Analysis on Surrogate:** The SHAP beeswarm plot for the surrogate model (if shown) indicates that **{top_shap_opt}** were key drivers of its predictions within the explored optimization space. Understanding these can help rationalize why the optimal settings work.
-        * **Surrogate Decision Tree:** The visual decision tree (if provided) offers a simplified, interpretable approximation of the surrogate model's logic, highlighting key decision rules based on (transformed) feature values.
-        * **Response Surface Plot:** This plot (if applicable, for 1 or 2 varied numerical inputs) visually maps how the predicted target changes as key inputs are varied, helping to understand the sensitivity and landscape around the optimum.
+        * **Surrogate Decision Tree:** {surrogate_tree_explanation}
+        * **Response Surface Plot:** This plot (if applicable, for 1 or 2 varied numerical inputs) visually maps how the predicted target changes as key inputs are varied, helping to understand the sensitivity and landscape around the optimum. The title and axes clearly indicate which variables are being plotted against the target.
 
         **Actionable Scientific Insights & Next Steps:**
         1.  **Crucial Lab Validation:** The **most important next step** is to experimentally validate these predicted optimal settings in your laboratory. Models guide, experiments confirm.
@@ -704,7 +753,7 @@ app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children
         dbc.NavItem(dbc.NavLink("2. Analysis & Results", active=False, href="#", id="nav-analysis", disabled=True, className="fw-medium fs-5 p-2")),
         dbc.NavItem(dbc.NavLink("3. AI Insights & Suggestions", active=False, href="#", id="nav-suggestions", disabled=True, className="fw-medium fs-5 p-2")),
     ], pills=True, className="nav-pills justify-content-center mb-4 shadow-sm bg-white rounded p-2"), width=12)),
-    dbc.Row(dbc.Col(html.Div(id='global-progress-message'), width=12)), # Initially empty
+    dbc.Row(dbc.Col(html.Div(id='global-progress-message'), width=12)), 
     dbc.Card(dbc.CardBody([
         html.Div(id="tab-content", className="p-3"),
         dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights (Exploration)"], id="btn-goto-suggestions-expl", color="info", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'}),
@@ -886,31 +935,16 @@ def confirm_setup_and_proceed(n_clicks, exp_type, inputs, output_var, ignored, m
     [State('store-current-analysis-type', 'data'), State('store-column-roles', 'data'), State('store-raw-data', 'data')],
 )
 def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json): 
-    # This function now always includes placeholders for both tables if the analysis tab is active.
-    # The actual content (buttons and results areas) is built based on analysis_type.
-
-    # Define placeholders that are always included if this tab is active,
-    # to ensure their IDs are available for other callbacks (like the modal).
-    # They are hidden by default and will be populated by specific analysis callbacks.
     placeholder_expl_table = html.Div(dash_table.DataTable(id='model-comparison-table', data=[], columns=[]), style={'display': 'none'})
     placeholder_opt_table = html.Div(dash_table.DataTable(id='surrogate-candidates-table', data=[], columns=[]), style={'display': 'none'})
     
-    # Placeholder for the actual results area, which will contain the populated table later
-    exploration_results_placeholder = html.Div(id="exploration-results-area")
-    optimization_results_placeholder = html.Div(id="optimization-results-area")
-
+    exploration_results_placeholder_div = html.Div(id="exploration-results-area") 
+    optimization_results_placeholder_div = html.Div(id="optimization-results-area") 
 
     if active_tab != 'tab-analysis': 
-        # If not the analysis tab, return the basic placeholders (already handled this way)
-        return html.Div([
-            html.Div(id='exploration-results-area', style={'display':'none'}), # Keep for consistency if other logic expects it
-            html.Div(id='optimization-results-area', style={'display':'none'}),
-            placeholder_expl_table,
-            placeholder_opt_table
-        ])
+        return html.Div([placeholder_expl_table, placeholder_opt_table, exploration_results_placeholder_div, optimization_results_placeholder_div], style={'display':'none'})
 
-    # --- Content for when active_tab == 'tab-analysis' ---
-    analysis_specific_ui_content = html.Div() # This will hold the UI for exploration or optimization
+    analysis_specific_ui_content = html.Div() 
 
     if not raw_data_json:
         analysis_specific_ui_content = dbc.Alert("No data uploaded. Please go back to 'Data & Setup' tab.", color="warning")
@@ -941,7 +975,7 @@ def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_dat
                             html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
                             html.P("This analysis will evaluate multiple machine learning models..."),
                             dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
-                            dcc.Loading(id="loading-exploration", type="default", children=[exploration_results_placeholder]) 
+                            dcc.Loading(id="loading-exploration", type="default", children=[exploration_results_placeholder_div]) 
                         ])
                     elif analysis_type == 'optimization':
                         analysis_specific_ui_content = html.Div([
@@ -951,14 +985,13 @@ def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_dat
                             dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
                             html.P("Note: For numerical inputs, ranges for optimization are inferred..."),
                             dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
-                            dcc.Loading(id="loading-optimization", type="default", children=[optimization_results_placeholder]) 
+                            dcc.Loading(id="loading-optimization", type="default", children=[optimization_results_placeholder_div]) 
                         ])
                     else:
                         analysis_specific_ui_content = dbc.Alert("Selected analysis type not recognized or setup incomplete.", color="warning")
         except Exception as e_df_check:
             analysis_specific_ui_content = dbc.Alert(f"Error processing data columns: {str(e_df_check)}", color="danger")
 
-    # Always return the main UI content AND both DataTable placeholders (hidden)
     return html.Div([
         analysis_specific_ui_content,
         placeholder_expl_table,
@@ -1022,9 +1055,9 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         print(f"Error Exploration AutoML: {e}\n{traceback.format_exc()}")
         error_message = f"Exploration Error: {str(e)}"
         current_step_text_for_store = f"Error: {str(e)}"
-        if not _captured_progress_steps_list: _captured_progress_steps_list = ["Error occurred during Exploration Analysis"] # Ensure steps list is not empty
+        if not _captured_progress_steps_list: _captured_progress_steps_list = ["Error occurred during Exploration Analysis"] 
         _captured_current_idx = min(_captured_current_idx, len(_captured_progress_steps_list) - 1)
-        if _captured_current_idx < 0: _captured_current_idx = 0 # Ensure index is not negative
+        if _captured_current_idx < 0: _captured_current_idx = 0 
 
         return dbc.Alert(error_message, color="danger"), \
                None, True, current_step_text_for_store, True, \
@@ -1209,13 +1242,15 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
     current_step_text_for_store_opt = "Initiating Optimization Analysis..."
 
     try:
-        feature_ranges = {col: {'min': df[col].min(), 'max': df[col].max()} for col in feature_columns if pd.api.types.is_numeric_dtype(df[col]) and col in df.columns and df[col].nunique() > 1} 
+        # feature_ranges_from_ui is the original feature_ranges passed from the UI (which is based on data min/max)
+        # This will be used by run_automl_pipeline to calculate extrapolated ranges.
+        feature_ranges_from_data = {col: {'min': df[col].min(), 'max': df[col].max()} for col in feature_columns if pd.api.types.is_numeric_dtype(df[col]) and col in df.columns and df[col].nunique() > 1} 
         
         all_model_results_opt, best_model_info_opt_dict, importances_opt, shap_beeswarm_plot_src_opt, \
         final_progress_steps_from_pipeline_opt, optimal_settings, predicted_target, \
         predicted_target_lower, predicted_target_upper, response_fig, surrogate_tree_text, \
         model_info_opt_summary, surrogate_tree_plot_src, actual_vs_pred_fig_opt, resid_fig_opt = \
-            run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges, missing_strategy, _progress_updater_local_opt)
+            run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges_from_data, missing_strategy, _progress_updater_local_opt)
         
         _captured_progress_steps_list_opt = list(final_progress_steps_from_pipeline_opt)
         _captured_current_idx_opt = len(_captured_progress_steps_list_opt) - 1
@@ -1228,7 +1263,6 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         if not _captured_progress_steps_list_opt: _captured_progress_steps_list_opt = ["Error occurred during Optimization Analysis"]
         _captured_current_idx_opt = min(_captured_current_idx_opt, len(_captured_progress_steps_list_opt)-1)
         if _captured_current_idx_opt < 0: _captured_current_idx_opt = 0
-
 
         return dbc.Alert(error_message_opt, color="danger"), \
                None, True, current_step_text_for_store_opt, True, \
@@ -1311,7 +1345,7 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
     else:
         surrogate_tree_plot_layout = html.Div([
             html.H5("Surrogate Tree Logic (Textual)", className="mt-4 mb-2 text-secondary"),
-            html.P("Visual plot not available or generation failed. Textual rules based on transformed features:", className="small text-muted"),
+            html.P("A visual plot of the surrogate tree could not be generated. This can happen if the tree is very simple (e.g., few splits due to the data or max_depth constraint) or due to rendering complexities with many features. The textual rules below, based on transformed features, still provide insight into the model's logic:", className="small text-muted"),
             dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text if surrogate_tree_text else "Tree text not available.", style={'whiteSpace': 'pre-wrap', 'maxHeight': '200px', 'overflowY':'auto', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px'})), className="mb-4")
         ])
         
