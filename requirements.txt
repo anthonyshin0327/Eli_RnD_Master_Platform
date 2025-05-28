@@ -1,9 +1,6 @@
-streamlit 
-pandas 
-numpy 
-matplotlib 
-seaborn 
-scikit-learn 
-shap 
-scikit-optimize
-seaborn
+dash
+dash-bootstrap-components
+pandas
+autogluon.tabular
+plotly
+openpyxl
