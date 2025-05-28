@@ -7,15 +7,17 @@ import io
 import base64
 import time # For simulating long processes
 import json # For LLM interaction (simulated)
+import traceback # For detailed error logging
+from itertools import product # Added this import for product
 
 # Import actual ML libraries
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.svm import SVR
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.tree import DecisionTreeRegressor, export_text # Added export_text
+from sklearn.tree import DecisionTreeRegressor, export_text, plot_tree # Added plot_tree
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error # Removed mean_absolute_percentage_error for now to simplify NaN handling
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
@@ -24,7 +26,12 @@ import shap # For feature importance explanations
 import plotly.graph_objects as go # For advanced plotting
 import plotly.express as px # For scatter plots
 
-# --- Embedded Demo Data (Replaced with content from lfa_random_data.csv) ---
+import matplotlib
+matplotlib.use('Agg') # Use non-interactive backend for matplotlib for Dash
+import matplotlib.pyplot as plt
+
+
+# --- Embedded Demo Data ---
 DEMO_DATA_CSV_STRING = """MEMBRANE_TYPE,ANTIBODY_CONCENTRATION,CONJUGATE_TYPE,CONJUGATE_VOLUME,BLOCKING_AGENT,INCUBATION_TIME,STRIP_WIDTH,SAMPLE_VOLUME,DETECTION_LIMIT,ASSAY_ID
 NC-180,0.861051855,Latex,0.393210974,Casein,13.69568098,2.932179499,117.1909017,2.180900702,LFA_001
 NC-170,2.860301253,Latex,0.426512115,Fish Gelatin,28.99795353,4.641443046,110.0016491,1.52726941,LFA_002
@@ -41,1573 +48,1323 @@ NC-135,2.010543046,AuNP,1.871712083,BSA,27.36607749,4.96689883,100.0001501,0.402
 NC-180,3.011145048,Carbon,0.516603071,Casein,12.04570701,2.500187113,119.9045579,0.760493034,LFA_015
 """
 
+# --- Model & Hyperparameter Explanations ---
+MODEL_EXPLANATIONS = {
+    "RandomForestRegressor": {
+        "description": "Builds multiple decision trees and merges them together to get a more accurate and stable prediction. Good for capturing complex non-linear relationships.",
+        "pros": "Robust to outliers, handles categorical and numerical data well, generally high accuracy.",
+        "cons": "Can be slower to train, less interpretable than single decision trees.",
+        "hyperparameters": {
+            "n_estimators": "The number of trees in the forest. More trees can improve performance but increase computation time.",
+            "max_depth": "The maximum depth of each tree. Deeper trees can model more complex patterns but risk overfitting."
+        }
+    },
+    "GradientBoostingRegressor": {
+        "description": "Builds trees one at a time, where each new tree helps to correct errors made by previously trained trees. Powerful and often provides high accuracy.",
+        "pros": "High accuracy, handles different types of data.",
+        "cons": "Sensitive to hyperparameters, can overfit if not tuned carefully, can be computationally intensive.",
+        "hyperparameters": {
+            "n_estimators": "The number of boosting stages (trees) to perform. More stages can lead to better performance but also overfitting.",
+            "learning_rate": "Shrinks the contribution of each tree. Lower values require more trees but can improve generalization."
+        }
+    },
+    "SVR": {
+        "description": "Support Vector Regression tries to find a function that deviates from y by a value no greater than ε for each training point x, and at the same time is as flat as possible.",
+        "pros": "Effective in high dimensional spaces, memory efficient.",
+        "cons": "Does not perform well with large datasets, sensitive to feature scaling and kernel choice.",
+        "hyperparameters": {
+            "C": "Regularization parameter. Strength of the regularization is inversely proportional to C. Must be strictly positive.",
+            "kernel": "Specifies the kernel type to be used in the algorithm (e.g., 'linear', 'rbf')."
+        }
+    },
+    "LinearRegression": {
+        "description": "Fits a linear model with coefficients w = (w1, ..., wp) to minimize the residual sum of squares between the observed targets in the dataset, and the targets predicted by the linear approximation.",
+        "pros": "Simple to understand, interpretable, computationally fast.",
+        "cons": "Assumes linear relationships, sensitive to outliers.",
+        "hyperparameters": {}
+    },
+    "Ridge": {
+        "description": "Linear least squares with L2 regularization. Adds a penalty equal to the square of the magnitude of coefficients to address multicollinearity and prevent overfitting.",
+        "pros": "Reduces model complexity, helps with multicollinearity.",
+        "cons": "Includes all features (doesn't perform feature selection).",
+        "hyperparameters": {
+            "alpha": "Regularization strength; must be a positive float. Larger values specify stronger regularization."
+        }
+    },
+    "Lasso": {
+        "description": "Linear Model trained with L1 prior as regularizer. Adds a penalty equal to the absolute value of the magnitude of coefficients, which can lead to some coefficients being zero (feature selection).",
+        "pros": "Performs feature selection, helps with multicollinearity.",
+        "cons": "Can be unstable with highly correlated features.",
+        "hyperparameters": {
+            "alpha": "Constant that multiplies the L1 term. Defaults to 1.0. alpha = 0 is equivalent to an ordinary least square."
+        }
+    },
+    "ElasticNet": {
+        "description": "A linear regression model trained with L1 and L2 prior as regularizer. This combination allows for learning a sparse model where few of the weights are non-zero like Lasso, while still maintaining the regularization properties of Ridge.",
+        "pros": "Combines benefits of Lasso and Ridge, good for highly correlated features.",
+        "cons": "Two hyperparameters to tune.",
+        "hyperparameters": {
+            "alpha": "Constant that multiplies the penalty terms. Defaults to 1.0.",
+            "l1_ratio": "The ElasticNet mixing parameter, with 0 <= l1_ratio <= 1. l1_ratio=0 corresponds to L2 penalty, l1_ratio=1 to L1."
+        }
+    },
+    "KNeighborsRegressor": {
+        "description": "Prediction based on the k-nearest neighbors of each point. The target is predicted by local interpolation of the targets associated of the k nearest neighbors in the training set.",
+        "pros": "Simple to understand, no assumptions about data distribution.",
+        "cons": "Computationally expensive for large datasets, sensitive to irrelevant features and feature scaling.",
+        "hyperparameters": {
+            "n_neighbors": "Number of neighbors to use by default for kneighbors queries.",
+            "weights": "Weight function used in prediction. Possible values: 'uniform', 'distance'."
+        }
+    },
+    "DecisionTreeRegressor": {
+        "description": "A non-parametric supervised learning method used for regression. It predicts the value of a target variable by learning simple decision rules inferred from the data features.",
+        "pros": "Easy to understand and interpret, handles both numerical and categorical data.",
+        "cons": "Can be unstable, prone to overfitting.",
+        "hyperparameters": {
+            "max_depth": "The maximum depth of the tree. If None, then nodes are expanded until all leaves are pure or until all leaves contain less than min_samples_split samples."
+        }
+    }
+}
+
+
 # --- Real AutoML Functions ---
 
 def create_preprocessing_pipeline(numerical_features, categorical_features, numerical_imputer_strategy):
-    """
-    Creates a preprocessing pipeline for numerical and categorical features.
-    Handles missing values and one-hot encoding.
-    numerical_imputer_strategy: must be a valid SimpleImputer strategy for numerical features, or None.
-    """
     transformers = []
-
     if numerical_features:
         num_pipeline_steps = []
         if numerical_imputer_strategy is not None:
             num_pipeline_steps.append(('imputer', SimpleImputer(strategy=numerical_imputer_strategy)))
-        num_pipeline_steps.append(('scaler', StandardScaler())) # Add StandardScaler for numerical features
+        num_pipeline_steps.append(('scaler', StandardScaler()))
         numerical_transformer = Pipeline(steps=num_pipeline_steps)
         transformers.append(('num', numerical_transformer, numerical_features))
-        
+
     if categorical_features:
         categorical_transformer = Pipeline(steps=[
-            ('imputer', SimpleImputer(strategy='most_frequent')), # Always impute categorical with most_frequent
-            ('onehot', OneHotEncoder(handle_unknown='ignore'))
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
         ])
         transformers.append(('cat', categorical_transformer, categorical_features))
 
-    preprocessor = ColumnTransformer(
-        transformers=transformers,
-        remainder='passthrough' # Keep other columns (like Assay ID)
-    )
+    preprocessor = ColumnTransformer(transformers=transformers, remainder='passthrough')
     return preprocessor
 
-# Define models and their hyperparameter grids for GridSearchCV
-MODELS_TO_EVALUATE = [
-    {
-        'name': 'RandomForestRegressor',
-        'estimator': RandomForestRegressor(random_state=42, n_jobs=-1),
-        'param_grid': {
-            'regressor__n_estimators': [50, 100, 200],
-            'regressor__max_depth': [None, 10, 20],
-        }
-    },
-    {
-        'name': 'GradientBoostingRegressor',
-        'estimator': GradientBoostingRegressor(random_state=42),
-        'param_grid': {
-            'regressor__n_estimators': [50, 100, 200],
-            'regressor__learning_rate': [0.01, 0.1, 0.2],
-        }
-    },
-    {
-        'name': 'SVR',
-        'estimator': SVR(),
-        'param_grid': {
-            'regressor__kernel': ['rbf', 'linear'],
-            'regressor__C': [0.1, 1, 10],
-        }
-    },
-    {
-        'name': 'LinearRegression',
-        'estimator': LinearRegression(),
-        'param_grid': {} # No hyperparameters to tune for basic Linear Regression
-    },
-    {
-        'name': 'Ridge',
-        'estimator': Ridge(random_state=42),
-        'param_grid': {
-            'regressor__alpha': [0.1, 1.0, 10.0]
-        }
-    },
-    {
-        'name': 'Lasso',
-        'estimator': Lasso(random_state=42),
-        'param_grid': {
-            'regressor__alpha': [0.1, 1.0, 10.0]
-        }
-    },
-    {
-        'name': 'ElasticNet',
-        'estimator': ElasticNet(random_state=42),
-        'param_grid': {
-            'regressor__alpha': [0.1, 1.0, 10.0],
-            'regressor__l1_ratio': [0.1, 0.5, 0.9]
-        }
-    },
-    {
-        'name': 'KNeighborsRegressor',
-        'estimator': KNeighborsRegressor(),
-        'param_grid': {
-            'regressor__n_neighbors': [3, 5, 7],
-            'regressor__weights': ['uniform', 'distance']
-        }
-    },
-    {
-        'name': 'DecisionTreeRegressor',
-        'estimator': DecisionTreeRegressor(random_state=42),
-        'param_grid': {
-            'regressor__max_depth': [None, 5, 10, 15]
-        }
-    }
-]
+# Initialize MODELS_TO_EVALUATE based on MODEL_EXPLANATIONS for consistency
+MODELS_TO_EVALUATE = []
+default_param_grids_from_user_code = { # From the user's provided code structure
+    'RandomForestRegressor': {'regressor__n_estimators': [50, 100, 200], 'regressor__max_depth': [None, 10, 20]},
+    'GradientBoostingRegressor': {'regressor__n_estimators': [50, 100, 200], 'regressor__learning_rate': [0.01, 0.1, 0.2]},
+    'SVR': {'regressor__kernel': ['rbf', 'linear'], 'regressor__C': [0.1, 1, 10]},
+    'LinearRegression': {},
+    'Ridge': {'regressor__alpha': [0.1, 1.0, 10.0]},
+    'Lasso': {'regressor__alpha': [0.1, 1.0, 10.0]},
+    'ElasticNet': {'regressor__alpha': [0.1, 1.0, 10.0], 'regressor__l1_ratio': [0.1, 0.5, 0.9]},
+    'KNeighborsRegressor': {'regressor__n_neighbors': [3, 5, 7], 'regressor__weights': ['uniform', 'distance']},
+    'DecisionTreeRegressor': {'regressor__max_depth': [None, 5, 10, 15]}
+}
+
+for key in MODEL_EXPLANATIONS.keys(): # Iterate through models we have explanations for
+    estimator_instance = None
+    if key == "RandomForestRegressor": estimator_instance = RandomForestRegressor(random_state=42, n_jobs=-1)
+    elif key == "GradientBoostingRegressor": estimator_instance = GradientBoostingRegressor(random_state=42)
+    elif key == "SVR": estimator_instance = SVR()
+    elif key == "LinearRegression": estimator_instance = LinearRegression()
+    elif key == "Ridge": estimator_instance = Ridge(random_state=42)
+    elif key == "Lasso": estimator_instance = Lasso(random_state=42)
+    elif key == "ElasticNet": estimator_instance = ElasticNet(random_state=42)
+    elif key == "KNeighborsRegressor": estimator_instance = KNeighborsRegressor()
+    elif key == "DecisionTreeRegressor": estimator_instance = DecisionTreeRegressor(random_state=42)
+
+    if estimator_instance is not None: # Changed from 'if estimator_instance:'
+        # Use the param grid from the user's provided code if available, otherwise empty
+        param_grid_for_model = default_param_grids_from_user_code.get(key, {})
+        MODELS_TO_EVALUATE.append({
+            'name': key,
+            'estimator': estimator_instance,
+            'param_grid': param_grid_for_model # Use the param grid from the user's structure
+        })
 
 
 def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges=None):
-    """
-    Generalized function to run AutoML for both exploration and optimization.
-    """
     print(f"Starting AutoML pipeline for {analysis_type} analysis on target: {target_column}")
-    
     all_model_results = []
-    best_model_info = None
-    best_r2 = -float('inf')
+    best_model_info_dict = None # This will store the dictionary of the best model
+    best_r2 = -float('inf') # Initialize with a very low R2 score
     total_models = len(MODELS_TO_EVALUATE)
-    
-    df_processed = data_df.copy()
-    imputer_strategy_for_pipeline = None
+    df_processed = data_df.copy() # Create a copy to avoid modifying the original DataFrame
+    imputer_strategy_for_pipeline = None # Strategy for numerical imputer in pipeline
 
-    # Handle missing values based on strategy
+    # Handle missing values based on the selected strategy
     if missing_value_strategy == 'drop_rows':
-        # Ensure only feature_columns and target_column are used for dropna, to avoid dropping rows due to NaNs in ignored columns
-        cols_for_dropna = feature_columns + [target_column]
-        df_processed = data_df[cols_for_dropna].dropna()
-        # After dropna, df_processed might have fewer rows. X and y should be derived from this df_processed.
-        imputer_strategy_for_pipeline = None 
-    elif missing_value_strategy == 'impute_mode':
-        imputer_strategy_for_pipeline = 'most_frequent' # This will be used for numerical if selected
-    else: # 'impute_mean', 'impute_median'
-        imputer_strategy_for_pipeline = missing_value_strategy
-    
-    # Select features (X) and target (y) from the (potentially row-reduced) df_processed
+        cols_for_dropna = feature_columns + [target_column] # Columns to consider for dropping rows
+        df_processed = data_df[cols_for_dropna].dropna().reset_index(drop=True)
+        imputer_strategy_for_pipeline = None # No imputer needed if rows are dropped
+    elif missing_value_strategy in ['mean', 'median', 'most_frequent']:
+        imputer_strategy_for_pipeline = missing_value_strategy # Set imputer strategy for pipeline
+    else:
+        raise ValueError(f"Invalid missing value strategy: {missing_value_strategy}")
+
+    # Define features (X) and target (y)
     X = df_processed[feature_columns]
     y = df_processed[target_column]
 
+    # Check if data is empty after preprocessing
+    if X.empty or y.empty:
+        raise ValueError("After handling missing values, the feature set (X) or target (y) is empty.")
+
+    # Identify numerical and categorical features
     numerical_features = X.select_dtypes(include=np.number).columns.tolist()
     categorical_features = X.select_dtypes(exclude=np.number).columns.tolist()
 
-    # Check if X or y is empty after potential dropna
-    if X.empty or y.empty:
-        raise ValueError("After handling missing values, the feature set (X) or target (y) is empty. Please check your data or missing value strategy.")
-
+    # Split data into training and testing sets
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Create the base preprocessor. For 'drop_rows', numerical_imputer_strategy will be None.
-    # For other strategies, it will be 'mean', 'median', or 'most_frequent'.
-    base_preprocessor = create_preprocessing_pipeline(numerical_features, categorical_features, 
-                                                      imputer_strategy_for_pipeline if missing_value_strategy != 'drop_rows' else None)
+    # Check if training/testing data is empty after split
+    if X_train.empty or X_test.empty:
+        raise ValueError("Training or testing data is empty after split. Dataset might be too small.")
 
-    progress_steps = [f"Training and optimizing {model['name']} ({i+1}/{total_models})" for i, model in enumerate(MODELS_TO_EVALUATE)]
-    progress_steps.append("Calculating SHAP values for the best model...")
+    # Create the base preprocessing pipeline
+    base_preprocessor = create_preprocessing_pipeline(
+        numerical_features, categorical_features,
+        imputer_strategy_for_pipeline if missing_value_strategy != 'drop_rows' else None
+    )
+
+    # Define progress steps for the UI
+    progress_steps = [f"Training {model['name']} ({i+1}/{total_models})" for i, model in enumerate(MODELS_TO_EVALUATE)]
+    progress_steps.append("Calculating SHAP for best model...")
     if analysis_type == 'optimization':
-        progress_steps.append("Generating Surrogate Tree Logic...")
-        progress_steps.append("Performing Optimization (Grid Search)...")
-        progress_steps.append("Evaluating Optimal Settings...")
-        progress_steps.append("Generating Optimization Results...")
-    progress_steps.append("Finalizing results and plots...")
+        progress_steps.extend(["Generating Surrogate Tree...", "Optimizing (Grid Search)...", "Evaluating Optimal Settings...", "Generating Optimization Results..."])
+    progress_steps.append("Finalizing results...")
+    progress_callback(progress_steps, 0) # Initial progress update
 
-    progress_callback(progress_steps, 0)
+    best_model_pipeline = None # To store the pipeline of the best performing model
 
-    best_model_pipeline = None # Initialize best_model_pipeline
-
+    # Iterate through each model configuration to train and evaluate
     for i, model_config in enumerate(MODELS_TO_EVALUATE):
         model_name = model_config['name']
         estimator = model_config['estimator']
         param_grid = model_config['param_grid']
-
-        progress_callback(progress_steps, i)
-
-        full_pipeline = Pipeline(steps=[
-            ('preprocessor', base_preprocessor),
-            ('regressor', estimator)
-        ])
+        progress_callback(progress_steps, i) # Update progress for current model training
         
+        # Create the full pipeline with preprocessor and regressor
+        full_pipeline = Pipeline(steps=[('preprocessor', base_preprocessor), ('regressor', estimator)])
         start_time = time.time()
+
+        # Determine cross-validation folds, handle small datasets
+        cv_folds = min(5, len(X_train) -1 if len(X_train) > 1 else 1) # Ensure at least 1 sample per fold if len(X_train) > 1
         
-        if param_grid:
-            grid_search = GridSearchCV(full_pipeline, param_grid, cv=min(5, len(X_train) if len(X_train) > 1 else 2), scoring='r2', n_jobs=-1) # Ensure cv is not > n_samples
+        current_best_pipeline_for_model = None # Stores the best pipeline for the current model (after CV if any)
+        best_params_for_model = {}
+        best_cv_score_for_model = -float('inf')
+
+        if len(X_train) <= cv_folds or cv_folds < 2 : # Not enough samples for meaningful CV
+            print(f"Warning: Dataset too small for {cv_folds}-fold CV for model {model_name}. Fitting without CV.")
+            current_best_pipeline_for_model = full_pipeline
+            current_best_pipeline_for_model.fit(X_train, y_train)
+            # For models without CV, 'best_params' remain empty, CV score is on training data
+            y_train_pred_cv = current_best_pipeline_for_model.predict(X_train)
+            best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
+        elif param_grid: # If hyperparameter grid is defined, perform GridSearchCV
+            grid_search = GridSearchCV(full_pipeline, param_grid, cv=cv_folds, scoring='r2', n_jobs=-1, error_score='raise')
             grid_search.fit(X_train, y_train)
-            current_best_pipeline = grid_search.best_estimator_
-            best_params = grid_search.best_params_
-            best_cv_score = grid_search.best_score_
-        else:
-            current_best_pipeline = full_pipeline
-            current_best_pipeline.fit(X_train, y_train)
-            best_params = {}
-            # Calculate R2 on training data if no CV
-            y_train_pred = current_best_pipeline.predict(X_train)
-            best_cv_score = r2_score(y_train, y_train_pred)
+            current_best_pipeline_for_model = grid_search.best_estimator_
+            best_params_for_model = grid_search.best_params_
+            best_cv_score_for_model = grid_search.best_score_
+        else: # No hyperparameter grid, fit the pipeline directly
+            current_best_pipeline_for_model = full_pipeline
+            current_best_pipeline_for_model.fit(X_train, y_train)
+            # CV score is on training data if no CV performed
+            y_train_pred_cv = current_best_pipeline_for_model.predict(X_train)
+            best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
 
-
-        training_time = time.time() - start_time
-
-        y_pred = current_best_pipeline.predict(X_test)
-
+        training_time = time.time() - start_time # Calculate training time
+        
+        # Make predictions on the test set and calculate metrics
+        y_pred = current_best_pipeline_for_model.predict(X_test)
         r_squared = r2_score(y_test, y_pred)
         mae = mean_absolute_error(y_test, y_pred)
         mse = mean_squared_error(y_test, y_pred)
         
-        # Calculate MAPE carefully, avoiding division by zero
-        # Ensure y_test is a numpy array for boolean indexing
+        # Calculate MAPE, handling division by zero
         y_test_np = np.array(y_test)
-        non_zero_mask = y_test_np != 0
-        if np.any(non_zero_mask): # Check if there are any non-zero values in y_test
-            mape = np.mean(np.abs((y_test_np[non_zero_mask] - y_pred[non_zero_mask]) / y_test_np[non_zero_mask])) * 100
-        else:
-            mape = np.nan # Or some other indicator like 'N/A' or None
+        non_zero_mask = y_test_np != 0 # Avoid division by zero for MAPE
+        mape = np.mean(np.abs((y_test_np[non_zero_mask] - y_pred[non_zero_mask]) / y_test_np[non_zero_mask])) * 100 if np.any(non_zero_mask) else np.nan
+        mape_serializable = None if np.isnan(mape) else mape # Ensure MAPE is JSON serializable
 
-        mape_serializable = None if np.isnan(mape) else mape
-
-
+        # Store results for the current model
         model_result = {
-            "Model Type": model_name,
-            "R-squared": r_squared,
-            "MAE": mae,
-            "RMSE": np.sqrt(mse),
-            "MAPE": mape_serializable,
-            "Best Hyperparameters": best_params,
-            "Cross-Validation R2": best_cv_score,
-            "Training Time (s)": training_time,
-            "Pipeline": current_best_pipeline # Keep pipeline for potential future use
+            "Model Type": model_name, "R-squared": r_squared, "MAE": mae, "RMSE": np.sqrt(mse),
+            "MAPE": mape_serializable, "Best Hyperparameters": best_params_for_model,
+            "Cross-Validation R2": best_cv_score_for_model, "Training Time (s)": training_time,
+            "Pipeline": current_best_pipeline_for_model, # Store the fitted pipeline object
+            "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(model_name, {}).get('hyperparameters', {})
         }
         all_model_results.append(model_result)
 
+        # Update the best model if current model performs better
         if r_squared > best_r2:
             best_r2 = r_squared
-            best_model_info = model_result
-            best_model_pipeline = current_best_pipeline # Update the best pipeline
+            best_model_info_dict = model_result # Store the entire dictionary for the best model
+            best_model_pipeline = current_best_pipeline_for_model # Keep track of the best pipeline object
 
-    progress_callback(progress_steps, total_models) # SHAP calculation step
+    progress_callback(progress_steps, total_models) # Update progress: SHAP calculation starts
+    
+    # Initialize SHAP related variables
+    shap_summary_plot = {} # To store SHAP plot figure
+    importances_df = pd.DataFrame() # To store SHAP importances
+    X_train_transformed_df = pd.DataFrame() # Transformed training data for SHAP
 
-    # --- SHAP Feature Importance for the BEST Model ---
-    shap_summary_plot = {}
-    importances_df = pd.DataFrame()
-    X_train_transformed_df = pd.DataFrame() # Initialize for scope
-
-    if best_model_pipeline:
-        # Ensure X_train is not empty for transformation
-        if X_train.empty:
-            print("Warning: X_train is empty, skipping SHAP value calculation.")
-        else:
+    # Calculate SHAP values if a best model is found and training data is not empty
+    if best_model_pipeline and not X_train.empty:
+        try:
+            # Transform training data using the preprocessor from the best pipeline
             X_train_transformed = best_model_pipeline.named_steps['preprocessor'].transform(X_train)
-            
-            feature_names_out = []
+        except Exception as e_transform: # Handle cases where transform might fail (e.g., preprocessor not fitted)
+            print(f"Error transforming X_train with preprocessor: {e_transform}. Trying to fit preprocessor first.")
             try:
-                # Attempt to get feature names from the preprocessor
+                best_model_pipeline.named_steps['preprocessor'].fit(X_train, y_train) # Fit if not already
+                X_train_transformed = best_model_pipeline.named_steps['preprocessor'].transform(X_train)
+            except Exception as e_fit_transform:
+                print(f"Critical error: Could not prepare X_train_transformed for SHAP: {e_fit_transform}")
+                X_train_transformed = None # Ensure it's None if transformation fails
+
+        if X_train_transformed is not None:
+            feature_names_out = []
+            try: # Get feature names after transformation
                 feature_names_out = best_model_pipeline.named_steps['preprocessor'].get_feature_names_out()
-            except AttributeError:
-                # Fallback for older sklearn or complex cases: reconstruct manually
+            except AttributeError: # Fallback if get_feature_names_out is not available (older scikit-learn or custom transformer)
                 ohe_feature_names = []
                 if 'cat' in best_model_pipeline.named_steps['preprocessor'].named_transformers_:
-                    cat_transformer_pipeline = best_model_pipeline.named_steps['preprocessor'].named_transformers_['cat']
-                    if 'onehot' in cat_transformer_pipeline.named_steps:
-                        ohe_transformer = cat_transformer_pipeline.named_steps['onehot']
-                        if categorical_features: # Ensure categorical_features is not empty
-                             try:
-                                ohe_feature_names = ohe_transformer.get_feature_names_out(categorical_features).tolist()
-                             except Exception as e:
-                                print(f"Warning: Could not get OHE feature names: {e}. Using original categorical names.")
-                                ohe_feature_names = categorical_features # Fallback
-                
-                # Combine numerical and OHE feature names
+                    cat_pipeline = best_model_pipeline.named_steps['preprocessor'].named_transformers_['cat']
+                    if 'onehot' in cat_pipeline.named_steps and categorical_features:
+                        try:
+                            ohe_feature_names = cat_pipeline.named_steps['onehot'].get_feature_names_out(categorical_features).tolist()
+                        except: # Generic fallback for one-hot encoded names
+                            ohe_feature_names = [f"cat_feature_{i}" for i in range(len(categorical_features))] # Simplified naming
                 feature_names_out = numerical_features + ohe_feature_names
-                
-                # Further fallback if still no names, use original X_train columns if shapes match
+                # Ensure the number of feature names matches the number of columns in transformed data
                 if not feature_names_out or len(feature_names_out) != X_train_transformed.shape[1]:
-                    if X_train.shape[1] == X_train_transformed.shape[1]: # If original features match transformed shape (e.g. no OHE)
-                         feature_names_out = X_train.columns.tolist()
-                    else: # Generic names if all else fails
-                        feature_names_out = [f"feature_{j}" for j in range(X_train_transformed.shape[1])]
-                print(f"Warning: get_feature_names_out() fallback used. Feature names: {feature_names_out}")
-
-
+                    feature_names_out = [f"feature_{j}" for j in range(X_train_transformed.shape[1])]
+            
             X_train_transformed_df = pd.DataFrame(X_train_transformed, columns=feature_names_out)
 
             if not X_train_transformed_df.empty:
-                # Sample for SHAP to keep it manageable
-                n_shap_samples = min(100, X_train_transformed_df.shape[0]) # Reduced sample size
+                n_shap_samples = min(100, X_train_transformed_df.shape[0]) # Use a subset for SHAP if dataset is large
                 if n_shap_samples > 0:
                     X_shap = X_train_transformed_df.sample(n=n_shap_samples, random_state=42)
-                    
                     regressor_step = best_model_pipeline.named_steps['regressor']
-                    # Use appropriate SHAP explainer
-                    if isinstance(regressor_step, (RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)):
-                        explainer = shap.TreeExplainer(regressor_step)
-                    else:
-                        # For KernelExplainer, background data should be small
-                        n_background_samples = min(50, X_train_transformed_df.shape[0])
-                        if n_background_samples > 0:
-                            background_data = shap.sample(X_train_transformed_df, n_background_samples)
-                            explainer = shap.KernelExplainer(regressor_step.predict, background_data)
-                        else:
-                            explainer = None # Not enough data for background
-                            print("Warning: Not enough data for KernelExplainer background. Skipping SHAP plot.")
-                    
+                    explainer = None
+                    try: # Create SHAP explainer based on model type
+                        if isinstance(regressor_step, (RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)):
+                            explainer = shap.TreeExplainer(regressor_step, X_shap) # TreeExplainer for tree-based models
+                        else: # KernelExplainer for other models
+                            n_background_samples = min(50, X_train_transformed_df.shape[0]) # Background data for KernelExplainer
+                            if n_background_samples > 0:
+                                background_data = shap.sample(X_train_transformed_df, n_background_samples)
+                                explainer = shap.KernelExplainer(regressor_step.predict, background_data)
+                    except Exception as shap_e:
+                        print(f"SHAP Explainer creation failed: {shap_e}")
+
                     if explainer:
-                        shap_values = explainer.shap_values(X_shap)
-
-                        # Handle different SHAP value structures (e.g., for multi-output or some explainers)
-                        if isinstance(shap_values, list): # Typically for multi-output, take the first output
-                            shap_values_abs_mean = np.abs(shap_values[0]).mean(axis=0)
-                        else:
-                            shap_values_abs_mean = np.abs(shap_values).mean(axis=0)
-
-                        importances_df = pd.DataFrame({
-                            'feature': X_shap.columns,
-                            'importance': shap_values_abs_mean
-                        }).sort_values(by='importance', ascending=False)
-                        
-                        shap_summary_plot = {
-                            'data': [go.Bar(x=importances_df['feature'], y=importances_df['importance'], marker_color='#17A2B8' if analysis_type == 'exploration' else '#28a745')],
-                            'layout': {
-                                'title': f'Feature Importance (Mean Absolute SHAP Value) for Best Model ({best_model_info["Model Type"]})',
-                                'xaxis': {'title': 'Feature', 'tickangle': 45},
-                                'yaxis': {'title': 'Mean Absolute SHAP Value'},
-                                'margin': {'l': 50, 'r': 50, 't': 50, 'b': 150}, # Increased bottom margin
-                                'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'font': {'color': '#495057'}
+                        try: # Calculate SHAP values
+                            shap_values = explainer.shap_values(X_shap)
+                            # Handle different SHAP value structures (e.g., list for multi-output)
+                            shap_values_abs_mean = np.abs(shap_values[0] if isinstance(shap_values, list) else shap_values).mean(axis=0)
+                            importances_df = pd.DataFrame({'feature': X_shap.columns, 'importance': shap_values_abs_mean}).sort_values(by='importance', ascending=False)
+                            # Create SHAP summary plot figure
+                            shap_summary_plot = {
+                                'data': [go.Bar(x=importances_df['feature'], y=importances_df['importance'], marker_color='#17A2B8' if analysis_type == 'exploration' else '#28a745')],
+                                'layout': {'title': f'Feature Importance (Mean SHAP) for {best_model_info_dict["Model Type"]}', 'xaxis': {'tickangle': 45}, 'yaxis': {'title': 'Mean Absolute SHAP Value'}, 'margin': {'b': 150, 't':50, 'l':50, 'r':50}, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'font': {'color': '#495057'}}
                             }
-                        }
-                else:
-                    print("Warning: Not enough samples for SHAP X_shap. Skipping SHAP plot.")
-    
+                        except Exception as e_shap_values:
+                            print(f"Error computing SHAP values: {e_shap_values}")
+                            importances_df = pd.DataFrame() # Empty dataframe if error
+                            shap_summary_plot = {} # Empty plot if error
+
+    # Return results based on analysis type
     if analysis_type == 'exploration':
-        progress_callback(progress_steps, total_models + 1) # Finalizing results
-        print("Exploration AutoML complete.")
-        return all_model_results, best_model_info, importances_df, shap_summary_plot, progress_steps
+        progress_callback(progress_steps, total_models + 1) # Update progress: Finalizing
+        return all_model_results, best_model_info_dict, importances_df, shap_summary_plot, progress_steps
 
     elif analysis_type == 'optimization':
-        progress_callback(progress_steps, total_models + 1) # Surrogate Tree Logic step
+        progress_callback(progress_steps, total_models + 1) # SHAP done, starting optimization specific steps
+        surrogate_tree_text = "Not applicable or error in generation." # Default text for surrogate tree
+        surrogate_tree_plot_src = None # For base64 encoded image of the tree
 
-        # --- Surrogate Tree Logic (Textual Representation) ---
-        surrogate_tree_text = "Not applicable (no transformed data or features for tree visualization)."
-        if not X_train_transformed_df.empty and X_train_transformed_df.shape[0] > 0:
-            # Ensure y_hat_best_model is not empty
-            if best_model_pipeline and not X_train.empty: # Use original X_train for predict
-                y_hat_best_model = best_model_pipeline.predict(X_train) 
-                interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42)  
-                # Fit interpretable_tree on transformed data and predictions from original X_train
-                interpretable_tree.fit(X_train_transformed_df, y_hat_best_model) 
-                
-                tree_feature_names = X_train_transformed_df.columns.tolist()
-                surrogate_tree_text = export_text(interpretable_tree, feature_names=tree_feature_names)
-                print("Surrogate Tree Text:\n", surrogate_tree_text)
+        # Generate surrogate decision tree if data is available
+        if not X_train_transformed_df.empty and X_train_transformed_df.shape[0] > 0 and best_model_pipeline:
+            y_hat_best_model = best_model_pipeline.predict(X_train) # Predictions from the best model on training data
+            interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42) # Simple tree for interpretability
+            interpretable_tree.fit(X_train_transformed_df, y_hat_best_model)
+            tree_feature_names = X_train_transformed_df.columns.tolist()
+            surrogate_tree_text = export_text(interpretable_tree, feature_names=tree_feature_names)
+            try: # Plot the surrogate tree
+                fig_tree, ax_tree = plt.subplots(figsize=(min(25, 4*len(tree_feature_names) if len(tree_feature_names)>0 else 10),12), dpi=100) # Dynamic width, increased DPI
+                plot_tree(interpretable_tree, feature_names=tree_feature_names, filled=True, rounded=True, fontsize=min(10, 120/len(tree_feature_names) if len(tree_feature_names)>0 else 10), ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
+                img_buffer = io.BytesIO()
+                fig_tree.savefig(img_buffer, format="png", bbox_inches="tight")
+                plt.close(fig_tree) # Close plot to free memory
+                img_buffer.seek(0)
+                img_base64 = base64.b64encode(img_buffer.read()).decode()
+                surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
+            except Exception as e_tree_plot:
+                print(f"Error generating surrogate tree plot: {e_tree_plot}")
+                surrogate_tree_plot_src = None # Ensure it's None if plotting fails
         
-        progress_callback(progress_steps, total_models + 2) # Performing Optimization (Grid Search)
+        progress_callback(progress_steps, total_models + 2) # Surrogate tree done
 
+        # Initialize optimization variables
         optimal_settings = {col: "N/A" for col in feature_columns}
-        predicted_target = 0.0
-        predicted_target_lower = 0.0
-        predicted_target_upper = 0.0
-        response_surface_fig = {}
+        predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan # Use NaN for numerics
+        response_surface_fig = {} # For response surface plot
 
-        # Define grid points for numerical features based on provided ranges
-        grid_points_num = {}
-        for col in numerical_features: # Iterate over numerical features identified from X
-            if col in feature_ranges: # Ensure the column has a defined range
-                min_val = feature_ranges[col]['min']
-                max_val = feature_ranges[col]['max']
-                grid_points_num[col] = np.linspace(min_val, max_val, 10) # 10 points for grid search
-            else:
-                # If a numerical feature has no range, use its mean from original data as a fixed value
-                grid_points_num[col] = np.array([X[col].mean()])
+        # Define grid points for optimization search
+        # Use a smaller number of points (e.g., 5) for numerical features for speed in demo
+        # For categorical, use all unique values
+        grid_points_num = {col: np.linspace(feature_ranges[col]['min'], feature_ranges[col]['max'], 5) for col in numerical_features if col in feature_ranges and feature_ranges[col]['min'] != feature_ranges[col]['max']}
+        grid_points_cat = {col: X[col].unique().tolist() for col in categorical_features}
 
-
-        # Define grid points for categorical features from their unique values in X
-        grid_points_cat = {}
-        for col in categorical_features: # Iterate over categorical features identified from X
-             grid_points_cat[col] = X[col].unique().tolist()
-
-
-        from itertools import product
-        
-        all_combinations = []
-        
-        # Create a list of (feature_name, iterable_of_values) for product
-        # Only include features that are actually part of the input `feature_columns`
-        iterables_for_product_details = []
-        for col in feature_columns:
-            if col in grid_points_num: # It's a numerical feature we are considering
+        iterables_for_product_details = [] # List of (feature_name, values_to_iterate)
+        for col in feature_columns: # Iterate over original feature columns to maintain order and completeness
+            if col in grid_points_num:
                 iterables_for_product_details.append((col, grid_points_num[col]))
-            elif col in grid_points_cat: # It's a categorical feature we are considering
+            elif col in grid_points_cat:
                 iterables_for_product_details.append((col, grid_points_cat[col]))
-        
-        current_iterables = [item[1] for item in iterables_for_product_details]
-        current_feature_names_ordered = [item[0] for item in iterables_for_product_details]
+            elif col in numerical_features: # Numerical feature not in feature_ranges (e.g. min=max) or not varied
+                 iterables_for_product_details.append((col, [X[col].mean()])) # Use mean if not varied
+            # If a categorical feature is not in grid_points_cat (should not happen if X is not empty), it would be missed.
+            # This logic assumes feature_columns are all covered by numerical_features or categorical_features.
 
-        if not current_iterables and feature_columns: 
-            # Case: No features to vary (e.g., all are fixed single values), but features were selected.
-            # Construct a single row with mean/mode.
+        current_iterables_values = [item[1] for item in iterables_for_product_details]
+        current_feature_names_ordered = [item[0] for item in iterables_for_product_details]
+        all_combinations_list = [] # List of dictionaries
+
+        if not current_iterables_values and feature_columns: # Case: No features to iterate over (e.g., all fixed)
+            # Create a single row with mean for numerical and mode for categorical
             fixed_row_dict = {}
             for col in feature_columns:
                 if col in numerical_features:
-                    fixed_row_dict[col] = X[col].mean() 
-                elif col in categorical_features:
-                    fixed_row_dict[col] = X[col].mode()[0] if not X[col].mode().empty else X[col].unique()[0] if X[col].nunique() > 0 else None
-            all_combinations.append(fixed_row_dict)
-        elif current_iterables:
-            for combo_values in product(*current_iterables):
-                current_combo_dict = {}
-                for i, feature_name in enumerate(current_feature_names_ordered):
-                    current_combo_dict[feature_name] = combo_values[i]
-                
-                # Ensure all original feature_columns are present, filling fixed ones if not varied
+                    fixed_row_dict[col] = X[col].mean()
+                elif col in categorical_features and not X[col].mode().empty:
+                    fixed_row_dict[col] = X[col].mode()[0]
+                else:
+                    fixed_row_dict[col] = None # Fallback for unhandled cases
+            all_combinations_list.append(fixed_row_dict)
+        elif current_iterables_values:
+            for combo_values in product(*current_iterables_values):
+                current_combo_dict = dict(zip(current_feature_names_ordered, combo_values))
+                # Ensure all original feature_columns are present in the combo_dict
+                # For features not part of the iteration (e.g., if they had only one value or were fixed)
                 for original_col in feature_columns:
                     if original_col not in current_combo_dict:
                         if original_col in numerical_features:
-                             current_combo_dict[original_col] = X[original_col].mean()
-                        elif original_col in categorical_features:
-                             current_combo_dict[original_col] = X[original_col].mode()[0] if not X[original_col].mode().empty else X[original_col].unique()[0] if X[original_col].nunique() > 0 else None
-                all_combinations.append(current_combo_dict)
-
-        if not all_combinations: # If still no combinations (e.g. no features selected)
-            # This case should ideally be prevented by UI validation (requiring feature selection)
-            # If it occurs, we can't proceed with prediction.
-            raise ValueError("No combinations generated for optimization grid search. Ensure features are selected and have valid ranges/values.")
-
-        optimization_df = pd.DataFrame(all_combinations, columns=feature_columns) # Ensure columns are in original order
+                            current_combo_dict[original_col] = X[original_col].mean() # Or a fixed value if appropriate
+                        elif original_col in categorical_features and not X[original_col].mode().empty:
+                            current_combo_dict[original_col] = X[original_col].mode()[0]
+                        else: # Fallback if somehow a column is missed
+                             current_combo_dict[original_col] = None
+                all_combinations_list.append(current_combo_dict)
         
-        # --- DEBUG PRINT (Optional: can be removed in production) ---
-        print(f"DEBUG (optimization_df columns before predict): {optimization_df.columns.tolist()}")
-        print(f"DEBUG (feature_columns expected by pipeline): {feature_columns}")
-        print(f"DEBUG (First 5 rows of optimization_df):\n{optimization_df.head()}")
-        # --- END DEBUG ---
+        if not all_combinations_list:
+            # This case should ideally not be reached if feature_columns is not empty.
+            # If it is, it implies an issue with generating combinations.
+            # For safety, create a default row if X is not empty.
+            if not X.empty:
+                default_row = {col: X[col].mean() if col in numerical_features else (X[col].mode()[0] if col in categorical_features and not X[col].mode().empty else None) for col in feature_columns}
+                all_combinations_list.append(default_row)
+            else: # Should have been caught by earlier checks on X.empty
+                 raise ValueError("No combinations for optimization grid search and X is empty.")
 
-        # Explicitly use feature_columns for prediction to ensure correct columns and order
-        optimization_predictions = best_model_pipeline.predict(optimization_df[feature_columns])
-
-
-        if optimization_goal == 'maximize':
-            optimal_idx = np.argmax(optimization_predictions)
-        else:
-            optimal_idx = np.argmin(optimization_predictions)
-
-        optimal_settings_series = optimization_df.iloc[optimal_idx]
-        optimal_settings = optimal_settings_series.to_dict()
-        predicted_target = optimization_predictions[optimal_idx]
-
-        # Estimate confidence interval for the prediction (simple approach using std of test predictions)
-        if not X_test.empty:
-            test_predictions = best_model_pipeline.predict(X_test[feature_columns]) # Use original X_test features
-            prediction_std = np.std(test_predictions)
-            predicted_target_lower = predicted_target - 1.96 * prediction_std 
-            predicted_target_upper = predicted_target + 1.96 * prediction_std
-        else: # Fallback if X_test was empty
-            predicted_target_lower = predicted_target 
-            predicted_target_upper = predicted_target
-
-
-        # Plotting response surface if 1 or 2 numerical features are in feature_columns
-        # and were part of the optimization grid (i.e., in grid_points_num and varied)
+        optimization_df = pd.DataFrame(all_combinations_list, columns=feature_columns) # Ensure column order
         
-        # Identify numerical features that were actually varied (more than 1 point in their grid)
-        varied_numerical_features = [col for col in numerical_features if col in feature_columns and col in grid_points_num and len(grid_points_num[col]) > 1]
+        if not optimization_df.empty:
+            optimization_predictions = best_model_pipeline.predict(optimization_df[feature_columns])
+            optimal_idx = np.argmax(optimization_predictions) if optimization_goal == 'maximize' else np.argmin(optimization_predictions)
+            optimal_settings = optimization_df.iloc[optimal_idx].to_dict()
+            predicted_target = optimization_predictions[optimal_idx]
 
-        if len(varied_numerical_features) == 2:
-            x_feat, y_feat = varied_numerical_features[0], varied_numerical_features[1]
-            
-            x_plot = grid_points_num[x_feat] # Use the actual grid points
-            y_plot = grid_points_num[y_feat]
-            X_grid, Y_grid = np.meshgrid(x_plot, y_plot)
+            # Estimate confidence interval using standard deviation of predictions on the test set
+            if not X_test.empty:
+                test_predictions_for_std = best_model_pipeline.predict(X_test[feature_columns])
+                prediction_std = np.std(test_predictions_for_std)
+                predicted_target_lower = predicted_target - 1.96 * prediction_std
+                predicted_target_upper = predicted_target + 1.96 * prediction_std
+            else: # Fallback if X_test is empty (should not happen with test_size > 0)
+                predicted_target_lower, predicted_target_upper = predicted_target, predicted_target
+        else: # optimization_df is empty, set defaults
+            optimal_settings = {col: "N/A" for col in feature_columns}
+            predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan
 
-            plot_df_rows = []
-            for i in range(X_grid.shape[0]):
-                for j in range(X_grid.shape[1]):
-                    row = {x_feat: X_grid[i, j], y_feat: Y_grid[i, j]}
-                    # Fill other features from optimal_settings (or their fixed values if not in optimal_settings)
-                    for col in feature_columns:
-                        if col not in row: # If not one of the varying numerical features
-                            row[col] = optimal_settings.get(col, X[col].mean() if col in numerical_features else X[col].mode()[0] if col in categorical_features and not X[col].mode().empty else None)
-                    plot_df_rows.append(row)
-            
-            plot_df = pd.DataFrame(plot_df_rows, columns=feature_columns) # Ensure correct column order
-            
-            Z_grid_flat = best_model_pipeline.predict(plot_df[feature_columns]) # Explicitly use feature_columns
-            Z_grid = Z_grid_flat.reshape(X_grid.shape)
 
-            response_surface_fig = {
-                'data': [go.Contour(x=x_plot, y=y_plot, z=Z_grid, colorscale='Viridis',
-                                     contours_coloring='heatmap', line_width=0, colorbar_title=target_column)],
-                'layout': {
-                    'title': f'Predicted Response Surface for {target_column}',
-                    'xaxis': {'title': x_feat},
-                    'yaxis': {'title': y_feat},
-                    'margin': {'l': 50, 'r': 50, 't': 50, 'b': 100},
-                    'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'font': {'color': '#495057'},
-                    'height': 500
+        progress_callback(progress_steps, total_models + 3) # Optimization grid search done
+
+        # Generate response surface plot if applicable
+        varied_numerical_features_for_plot = [col for col in numerical_features if col in feature_columns and col in grid_points_num and len(grid_points_num[col]) > 1]
+        plot_points_surface = 15 # Number of points for each axis in surface plot
+
+        if len(varied_numerical_features_for_plot) >= 2:
+            x_feat, y_feat = varied_numerical_features_for_plot[0], varied_numerical_features_for_plot[1]
+            x_plot_range = np.linspace(feature_ranges[x_feat]['min'], feature_ranges[x_feat]['max'], plot_points_surface)
+            y_plot_range = np.linspace(feature_ranges[y_feat]['min'], feature_ranges[y_feat]['max'], plot_points_surface)
+            X_grid, Y_grid = np.meshgrid(x_plot_range, y_plot_range)
+
+            plot_df_list_surface = []
+            # Create dataframe for predictions across the grid
+            for i_idx in range(X_grid.shape[0]):
+                for j_idx in range(X_grid.shape[1]):
+                    row = {x_feat: X_grid[i_idx, j_idx], y_feat: Y_grid[i_idx, j_idx]}
+                    # Fill other features with optimal values or means/modes
+                    for col_fill in feature_columns:
+                        if col_fill not in row:
+                            row[col_fill] = optimal_settings.get(col_fill, X[col_fill].mean() if col_fill in numerical_features else (X[col_fill].mode()[0] if col_fill in categorical_features and not X[col_fill].mode().empty else None))
+                    plot_df_list_surface.append(row)
+            
+            plot_df_surface = pd.DataFrame(plot_df_list_surface, columns=feature_columns)
+            if not plot_df_surface.empty:
+                Z_grid_flat = best_model_pipeline.predict(plot_df_surface[feature_columns])
+                Z_grid = Z_grid_flat.reshape(X_grid.shape)
+                response_surface_fig = {
+                    'data': [go.Contour(x=x_plot_range, y=y_plot_range, z=Z_grid, colorscale='Viridis', contours_coloring='heatmap', colorbar_title=target_column)],
+                    'layout': {'title': f'Predicted Response Surface for {target_column}', 'xaxis': {'title': x_feat}, 'yaxis': {'title': y_feat}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}
                 }
-            }
-        elif len(varied_numerical_features) == 1:
-            x_feat = varied_numerical_features[0]
-            x_plot = grid_points_num[x_feat] # Use actual grid points
-            
-            plot_df_rows = []
-            for val_x in x_plot:
+        elif len(varied_numerical_features_for_plot) == 1: # 1D plot if only one numerical feature varied
+            x_feat = varied_numerical_features_for_plot[0]
+            x_plot_range = np.linspace(feature_ranges[x_feat]['min'], feature_ranges[x_feat]['max'], plot_points_surface * 2)
+            plot_df_rows_1d = []
+            for val_x in x_plot_range:
                 row = {x_feat: val_x}
-                for col in feature_columns:
-                     if col not in row:
-                        row[col] = optimal_settings.get(col, X[col].mean() if col in numerical_features else X[col].mode()[0] if col in categorical_features and not X[col].mode().empty else None)
-                plot_df_rows.append(row)
-
-            plot_df = pd.DataFrame(plot_df_rows, columns=feature_columns)
-            y_plot_vals = best_model_pipeline.predict(plot_df[feature_columns]) # Explicitly use feature_columns
-            
-            response_surface_fig = {
-                'data': [go.Scatter(x=x_plot, y=y_plot_vals, mode='lines', line_color='#28a745')],
-                'layout': {
-                    'title': f'Predicted Response Curve for {target_column} vs {x_feat}',
-                    'xaxis': {'title': x_feat},
-                    'yaxis': {'title': target_column},
-                    'margin': {'l': 50, 'r': 50, 't': 50, 'b': 100},
-                    'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'font': {'color': '#495057'},
-                    'height': 500
+                for col_fill in feature_columns:
+                    if col_fill not in row:
+                        row[col_fill] = optimal_settings.get(col_fill, X[col_fill].mean() if col_fill in numerical_features else (X[col_fill].mode()[0] if col_fill in categorical_features and not X[col_fill].mode().empty else None))
+                plot_df_rows_1d.append(row)
+            plot_df_1d = pd.DataFrame(plot_df_rows_1d, columns=feature_columns)
+            if not plot_df_1d.empty:
+                y_plot_vals = best_model_pipeline.predict(plot_df_1d[feature_columns])
+                response_surface_fig = {
+                    'data': [go.Scatter(x=x_plot_range, y=y_plot_vals, mode='lines', line_color='#28a745')],
+                    'layout': {'title': f'Predicted Response: {target_column} vs {x_feat}', 'xaxis': {'title': x_feat}, 'yaxis': {'title': target_column}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}
                 }
-            }
-        else: # 0 or >2 varied numerical features
-            response_surface_fig = {}
+        
+        progress_callback(progress_steps, total_models + 4) # Evaluating optimal settings done
+
+        # Prepare summary of the model used for optimization (the best model from the initial phase)
+        model_info_summary = {}
+        if best_model_info_dict: # best_model_info_dict refers to the best model chosen before optimization specific steps
+            regressor_params = best_model_info_dict['Pipeline'].named_steps['regressor'].get_params()
+            # Filter for relevant hyperparameters to display
+            hyperparams_to_show = {k_orig: v for k_orig, v in regressor_params.items() if k_orig.split('__')[-1] in MODEL_EXPLANATIONS.get(best_model_info_dict['Model Type'], {}).get('hyperparameters', {})}
+            if not hyperparams_to_show and best_model_info_dict.get("Best Hyperparameters"): # Fallback to stored best params if direct get_params is too verbose
+                 hyperparams_to_show = best_model_info_dict.get("Best Hyperparameters", {})
 
 
-        progress_callback(progress_steps, total_models + 3) # Evaluating Optimal Settings
-
-        # Prepare model_info for the optimization results
-        # Ensure best_model_info (from the model selection phase) is available
-        if best_model_info:
-             # Get params from the regressor step of the best pipeline
-            regressor_params = best_model_info['Pipeline'].named_steps['regressor'].get_params()
-            # Filter for simpler display if needed, or show all
-            hyperparams_to_show = {k: v for k, v in regressor_params.items() if '__' not in k or k.startswith('n_estimators') or k.startswith('random_state') or k.startswith('max_depth') or k.startswith('learning_rate') or k.startswith('C') or k.startswith('kernel') or k.startswith('alpha') or k.startswith('l1_ratio') or k.startswith('n_neighbors') or k.startswith('weights')}
-
-
-            model_info_for_opt_summary = {
-                "Model Type": best_model_info.get('Model Type', "N/A"),
-                "Hyperparameters": hyperparams_to_show, # Use filtered hyperparams
+            model_info_summary = {
+                "Model Type": best_model_info_dict.get('Model Type', "N/A"),
+                "Hyperparameters": hyperparams_to_show,
                 "Training Data Shape": X_train.shape if not X_train.empty else "N/A",
                 "Test Data Shape": X_test.shape if not X_test.empty else "N/A",
-                "Features Used": feature_columns,
-                "Target Column": target_column,
+                "Features Used": feature_columns, "Target Column": target_column,
                 "Missing Value Strategy": missing_value_strategy,
-                "Optimization Goal": optimization_goal
+                "Optimization Goal": optimization_goal,
+                "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(best_model_info_dict.get('Model Type', ''), {}).get('hyperparameters', {})
             }
-        else: # Fallback if best_model_info wasn't populated (should not happen in normal flow)
-            model_info_for_opt_summary = {"Error": "Best model information not found."}
-
-
-        progress_callback(progress_steps, total_models + 4) # Generating Optimization Results
-        print("Optimization AutoML complete.")
-        return all_model_results, best_model_info, importances_df, shap_summary_plot, progress_steps, \
+        
+        progress_callback(progress_steps, total_models + 5) # Finalizing optimization results
+        return all_model_results, best_model_info_dict, importances_df, shap_summary_plot, progress_steps, \
                optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
-               response_surface_fig, surrogate_tree_text, model_info_for_opt_summary
+               response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src
 
 
 def run_exploration_automl(data_df, target_column, feature_columns, missing_value_strategy, progress_callback):
+    # Wrapper for exploration analysis
     return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, 'exploration')
 
 def run_optimization_automl(data_df, target_column, feature_columns, optimization_goal, feature_ranges, missing_value_strategy, progress_callback):
-    return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, 'optimization', 
-                               optimization_goal=optimization_goal, feature_ranges=feature_ranges)
+    # Wrapper for optimization analysis
+    return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy,
+                                 progress_callback, 'optimization',
+                                 optimization_goal=optimization_goal, feature_ranges=feature_ranges)
 
 
 def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition=""):
-    print(f"Generating insights for {analysis_type} (LLM simulation)...")
-    # Simplified results_data for prompt to avoid excessive length if full model details are included
     prompt_data = {}
+    best_model_name = "N/A" # Default
+
     if analysis_type == "Exploration":
+        # For exploration, best_model_info contains the details of the best overall model
+        best_model_name = results_data.get('best_model_info', {}).get('Model Type', 'N/A')
         prompt_data = {
             'target_column': results_data.get('target_column'),
-            'best_model_type': results_data.get('best_model_info', {}).get('Model Type'),
+            'best_model_type': best_model_name,
             'best_model_r_squared': results_data.get('best_model_info', {}).get('R-squared'),
             'top_features': [f['feature'] for f in results_data.get('importances', [])[:3]],
-            'missing_strategy': results_data.get('missing_strategy')
+            'missing_strategy': results_data.get('missing_strategy', 'default') # Ensure missing_strategy is passed
         }
     elif analysis_type == "Optimization":
-         prompt_data = {
+        # For optimization, model_info refers to the surrogate model, which is the best_model_info from the exploration phase
+        best_model_name = results_data.get('model_info', {}).get('Model Type', 'N/A')
+        prompt_data = {
             'target_column': results_data.get('target_column'),
             'optimization_goal': results_data.get('goal'),
-            'surrogate_model_type': results_data.get('model_info', {}).get('Model Type'),
+            'surrogate_model_type': best_model_name, # This is the best model from initial run, used as surrogate
             'optimal_settings': results_data.get('optimal_settings'),
             'predicted_target': results_data.get('predicted_target'),
-            'top_features_in_surrogate': [f['feature'] for f in results_data.get('importances', [])[:3]],
-            'missing_strategy': results_data.get('missing_strategy')
+            'top_features_in_surrogate': [f['feature'] for f in results_data.get('importances', [])[:3]], # SHAP from the surrogate model
+            'missing_strategy': results_data.get('missing_strategy', 'default') # Ensure missing_strategy is passed
         }
 
-    base_prompt = f"The R&D team has performed an '{analysis_type}' analysis. Key results are: {json.dumps(prompt_data)}. Provide a detailed, human-like explanation, focusing on actionable insights for synthetic biology and protein engineering."
-    
+    model_desc_for_prompt = MODEL_EXPLANATIONS.get(best_model_name, {}).get('description', 'Standard machine learning model.')
+    base_prompt = f"The R&D team performed an '{analysis_type}' analysis. Key results: {json.dumps(prompt_data)}. The primary model used/identified as best was '{best_model_name}', which is described as: '{model_desc_for_prompt}'. Explain these results in detail for a scientist, focusing on actionable insights for synthetic biology or protein engineering. Elaborate on why the '{best_model_name}' model might have been chosen or performed well given its nature and the data context. If optimization, explain how the surrogate model ({best_model_name}) helps find optimal settings."
     final_prompt = f"{base_prompt} {custom_prompt_addition}".strip()
-    print(f"LLM Prompt (simulated): {final_prompt[:500]}...") # Print start of prompt for debugging
+    print(f"LLM Prompt (simulated): {final_prompt[:600]}...") # Simulate sending to LLM
+    time.sleep(1) # Simulate LLM processing time
 
-    time.sleep(1) # Simulate API call
-    print("LLM explanation generation complete.")
+    # Generate structured explanation based on analysis type
     if analysis_type == "Exploration":
-        all_model_results = results_data.get('all_model_results', [])
-        best_model_info = results_data.get('best_model_info', {})
-        importances_df_data = results_data.get('importances', []) # This is a list of dicts
-        importances_df = pd.DataFrame(importances_df_data) if importances_df_data else pd.DataFrame()
-        
+        best_model_info_expl = results_data.get('best_model_info', {})
+        best_model_name_expl = best_model_info_expl.get('Model Type', 'N/A')
+        best_model_props = MODEL_EXPLANATIONS.get(best_model_name_expl, {})
+        rationale = f"The **{best_model_name_expl}** was identified as the best performing model. Its strengths, such as {best_model_props.get('pros', 'good general performance')}, likely contributed. This model works by: {best_model_props.get('description', 'Standard machine learning approach.')}"
+
+        importances_df_data = results_data.get('importances', [])
+        importances_df = pd.DataFrame(importances_df_data) if importances_df_data else pd.DataFrame() # Handle empty
         top_features_str = ", ".join(importances_df.head(3)['feature'].tolist()) if not importances_df.empty else "N/A"
-        
-        best_model_name = best_model_info.get('Model Type', 'N/A')
-        best_r_squared = best_model_info.get('R-squared', 'N/A')
-        best_mae = best_model_info.get('MAE', 'N/A')
-        best_rmse = best_model_info.get('RMSE', 'N/A')
-        best_mape = best_model_info.get('MAPE', 'N/A') # Already serializable (None or float)
-        
-        best_r_squared_val = best_r_squared if isinstance(best_r_squared, (int, float)) else 0.0
 
-        model_comparison_summary = ""
-        if len(all_model_results) > 1:
-            model_comparison_summary = "\n\n**Model Comparison Snapshot:**\n"
-            for model in all_model_results:
-                r2_val = f"{model.get('R-squared', 0):.3f}" if isinstance(model.get('R-squared'), (int, float)) else "N/A"
-                mae_val = f"{model.get('MAE', 0):.3f}" if isinstance(model.get('MAE'), (int, float)) else "N/A"
-                rmse_val = f"{model.get('RMSE', 0):.3f}" if isinstance(model.get('RMSE'), (int, float)) else "N/A"
-                model_comparison_summary += f"- **{model.get('Model Type', 'Unknown')}**: R²={r2_val}, MAE={mae_val}, RMSE={rmse_val}\n"
-
-        mape_display = f"{best_mape:.2f}%" if isinstance(best_mape, (int, float)) and not np.isnan(best_mape) else "N/A"
-        r_squared_display = f"{best_r_squared:.3f}" if isinstance(best_r_squared, (int, float)) else "N/A"
-        mae_display = f"{best_mae:.3f}" if isinstance(best_mae, (int, float)) else "N/A"
-        rmse_display = f"{best_rmse:.3f}" if isinstance(best_rmse, (int, float)) else "N/A"
-
+        r_squared_display = f"{best_model_info_expl.get('R-squared', 0):.3f}"
+        best_r_squared_val = best_model_info_expl.get('R-squared', 0.0) if isinstance(best_model_info_expl.get('R-squared'), (int, float)) else 0.0
+        mae_display = f"{best_model_info_expl.get('MAE', 0):.3f}"
+        rmse_display = f"{best_model_info_expl.get('RMSE', 0):.3f}"
+        mape_val = best_model_info_expl.get('MAPE')
+        mape_display = f"{mape_val:.2f}%" if isinstance(mape_val, (int, float)) and not np.isnan(mape_val) else "N/A"
 
         return f"""
         #### **Exploration Analysis: Uncovering Key Factors**
-        **Objective:** Our automated exploration aimed to pinpoint which of your input variables (we call them 'features') have the most significant impact on your chosen output, '{results_data.get('target_column', 'N/A')}'.
-        **Methodology:** We employed an **AutoML pipeline** that systematically evaluated multiple machine learning models including **Random Forest, Gradient Boosting, SVR, Linear Regression, Ridge, Lasso, Elastic Net, KNeighborsRegressor, and Decision Tree Regressor**. For each model, **hyperparameters were optimized using Grid Search with cross-validation** to ensure the best possible performance and robustness. Data preprocessing involved handling missing values using a **'{results_data.get('missing_strategy', 'default')}'** strategy and applying **One-Hot Encoding for categorical features and Standard Scaling for numerical features**. The dataset was split into training and testing sets for robust model evaluation.
-        **Why '{best_model_name}' was chosen as the best:**
-        The **{best_model_name}** model was selected as the best performer primarily due to its superior **R-squared value of {r_squared_display}** on the test set, indicating it explains the highest proportion of variance in your target variable compared to other models. It also demonstrated strong performance across other metrics like MAE and RMSE.
-        **What We Found (Best Model: {best_model_name}):**
-        * **Top Influencers:** The analysis, primarily driven by **SHAP (SHapley Additive exPlanations) values**, suggests that **{top_features_str}** are the most critical variables influencing '{results_data.get('target_column', 'N/A')}'. SHAP values provide a clear and transparent way to understand how each feature contributes to the model's predictions.
-        * **Model Fit (R-squared):** The best model achieved an R-squared of **{r_squared_display}**, indicating that approximately **{best_r_squared_val*100:.0f}%** of the variance in your target variable can be explained by the input features.
-        * **Mean Absolute Error (MAE):** The MAE was **{mae_display}**.
-        * **Root Mean Squared Error (RMSE):** The RMSE was **{rmse_display}**.
-        * **Mean Absolute Percentage Error (MAPE):** The MAPE was **{mape_display}** (if applicable).
-        {model_comparison_summary}
-        **Actionable Insights & Suggestions:**
-        1.  **Prioritize Investigation:** Focus your future experimental efforts on **{top_features_str}**.
-        2.  **Mechanistic Understanding:** Delve into the underlying mechanisms explaining why these top features are influential.
-        3.  **Targeted Optimization:** Consider these high-impact features for fine-tuning in optimization experiments.
-        4.  **Data Quality Review:** Assess data quality for these key features.
+        **Objective:** To identify input variables ('features') significantly impacting your output: '{results_data.get('target_column', 'N/A')}'.
+        **Methodology:** An AutoML pipeline evaluated multiple models, optimizing hyperparameters via Grid Search and cross-validation. Preprocessing included a **'{results_data.get('missing_strategy', 'default').replace('_', ' ').title()}'** strategy, One-Hot Encoding, and Standard Scaling.
+        **Best Model: {best_model_name_expl}**
+        * **Rationale for Choice:** {rationale}
+        * **Performance:** R-squared: **{r_squared_display}** (explains ~**{best_r_squared_val*100:.0f}%** of variance), MAE: **{mae_display}**, RMSE: **{rmse_display}**, MAPE: **{mape_display}**.
+        * **Top Influencers (SHAP analysis):** **{top_features_str}** are most critical for '{results_data.get('target_column', 'N/A')}'.
+        **Actionable Insights:**
+        1.  **Prioritize {top_features_str}** for investigation and further experiments.
+        2.  Explore the underlying biochemical or mechanistic reasons for their strong influence.
+        3.  Consider these high-impact features as primary candidates for fine-tuning in subsequent optimization experiments.
+        4.  Review the data quality and variability for these key features. High importance coupled with noisy data might indicate a need for more precise measurement techniques.
+        {custom_prompt_addition}
         """
+
     elif analysis_type == "Optimization":
+        surrogate_model_info = results_data.get('model_info', {}) # This is the summary of the best model used as surrogate
+        surrogate_model_name = surrogate_model_info.get('Model Type', 'N/A')
+        surrogate_props = MODEL_EXPLANATIONS.get(surrogate_model_name, {})
+        
+        # Performance of the surrogate model (from its initial evaluation)
+        surrogate_perf_info = results_data.get('best_model_info', {}) # This is the original performance dict of the chosen surrogate
+        surrogate_r2 = surrogate_perf_info.get('R-squared', 0.0)
+
+
+        surrogate_explanation = f"The **{surrogate_model_name}** was selected as the surrogate model for this optimization. {surrogate_props.get('description', '')} This model was chosen because it demonstrated strong predictive power (R-squared: {surrogate_r2:.3f}) on your dataset during the initial evaluation phase. By using this validated model, we can efficiently simulate thousands of experimental conditions to predict outcomes without needing to run each in the lab, thereby guiding us to the optimal settings."
+
         optimal_settings_data = results_data.get('optimal_settings', {})
         optimal_settings_str = ", ".join([f"**{k}**: {v:.3f}" if isinstance(v, (int, float, np.number)) and not np.isnan(v) else f"**{k}**: {v}" for k, v in optimal_settings_data.items()])
         goal_verb = "maximize" if results_data.get('goal') == "maximize" else "minimize"
         
-        predicted_val = results_data.get('predicted_target', 'N/A')
-        predicted_lower = results_data.get('predicted_target_lower', 'N/A')
-        predicted_upper = results_data.get('predicted_target_upper', 'N/A')
-        
-        importances_opt_df_data = results_data.get('importances', [])
+        predicted_val = results_data.get('predicted_target', np.nan)
+        predicted_lower = results_data.get('predicted_target_lower', np.nan)
+        predicted_upper = results_data.get('predicted_target_upper', np.nan)
+
+        importances_opt_df_data = results_data.get('importances', []) # SHAP importances from the surrogate model
         importances_opt_df = pd.DataFrame(importances_opt_df_data) if importances_opt_df_data else pd.DataFrame()
         top_shap_features_str = ", ".join(importances_opt_df.head(3)['feature'].tolist()) if not importances_opt_df.empty else "N/A"
-
+        
         predicted_val_num = predicted_val if isinstance(predicted_val, (int, float)) and not np.isnan(predicted_val) else 0.0
         predicted_lower_num = predicted_lower if isinstance(predicted_lower, (int, float)) and not np.isnan(predicted_lower) else 0.0
         predicted_upper_num = predicted_upper if isinstance(predicted_upper, (int, float)) and not np.isnan(predicted_upper) else 0.0
-        
-        surrogate_tree_logic = results_data.get('surrogate_tree_text', 'N/A')
-        tree_explanation_part = ""
-        if surrogate_tree_logic and surrogate_tree_logic != "Not applicable (no transformed data or features for tree visualization)." and surrogate_tree_logic != "Not applicable (no numerical features or transformed data for tree visualization).": # Added one more check
-            tree_explanation_part = f"""
-        * **Surrogate Tree Logic:** A simplified decision tree approximated the surrogate model's behavior. Its rules offer insights into decision paths.
-        ```
-        {surrogate_tree_logic[:1000]}... 
-        ```
-        (Full tree logic available in detailed results)
-        """
-        
-        best_model_name_opt = results_data.get('model_info', {}).get('Model Type', 'N/A')
-        
-        model_comparison_summary_opt = ""
-        all_opt_models = results_data.get('all_model_results', [])
-        if len(all_opt_models) > 1:
-            model_comparison_summary_opt = "\n\n**Surrogate Model Candidates Comparison:**\n"
-            for model in all_opt_models:
-                r2_val = f"{model.get('R-squared',0):.3f}" if isinstance(model.get('R-squared'), (int, float)) else "N/A"
-                mae_val = f"{model.get('MAE',0):.3f}" if isinstance(model.get('MAE'), (int, float)) else "N/A"
-                rmse_val = f"{model.get('RMSE',0):.3f}" if isinstance(model.get('RMSE'), (int, float)) else "N/A"
-                model_comparison_summary_opt += f"- **{model.get('Model Type', 'Unknown')}**: R²={r2_val}, MAE={mae_val}, RMSE={rmse_val}\n"
 
         return f"""
         #### **Optimization Analysis: Finding the Sweet Spot**
         **Objective:** To identify optimal experimental conditions to **{goal_verb}** '{results_data.get('target_column', 'N/A')}'.
-        **Methodology:** An **AutoML pipeline** selected the best predictive model (the **'{best_model_name_opt}'**) from several candidates (including Random Forest, Gradient Boosting, etc.) using hyperparameter optimization and cross-validation. This best model served as a surrogate. Data preprocessing involved a **'{results_data.get('missing_strategy', 'default')}'** strategy for missing values, plus One-Hot Encoding and Standard Scaling. A **grid search** across input variable ranges then identified conditions to meet your optimization goal.
+        **Methodology & Surrogate Model:** {surrogate_explanation} A systematic grid search was performed across the defined ranges of your input variables using this surrogate model to predict the target output for various combinations.
         **Optimal Settings Suggested:** {optimal_settings_str}
-        **Predicted Outcome:** Approx. target value of **{predicted_val_num:.3f}** (95% CI: {predicted_lower_num:.3f} - {predicted_upper_num:.3f}).
-        **Surrogate Model Insights ({best_model_name_opt}):**
-        * **SHAP analysis** indicates **{top_shap_features_str}** were most influential.
-        * The **response surface plot** (if applicable) visually shows how key inputs impact the output.
-        {tree_explanation_part}
-        {model_comparison_summary_opt}
-        **Actionable Insights & Suggestions:**
-        1.  **Experimental Validation:** Crucially, **validate these settings in your lab**.
-        2.  **Sensitivity Analysis:** Experiment by slightly varying settings to understand robustness.
-        3.  **Practical Constraints:** Consider lab constraints when implementing.
-        4.  **Iterative Optimization:** Use results to refine ranges for further optimization rounds.
+        **Predicted Outcome:** Under these optimal conditions, the model predicts an approximate target value of **{predicted_val_num:.3f}** (with a 95% Confidence Interval: {predicted_lower_num:.3f} - {predicted_upper_num:.3f}).
+        **Key Insights from Surrogate Model ({surrogate_model_name}):**
+        * **SHAP analysis** on the surrogate model indicates that **{top_shap_features_str}** were the most influential features in its predictions for the conditions explored.
+        * The **response surface/curve plot** (if shown) and the **visual surrogate tree** offer graphical representations of the model's logic and how changes in key inputs impact the predicted output.
+        **Actionable Insights:**
+        1.  **Experimental Validation:** The most crucial next step is to **experimentally validate** these predicted optimal settings in your lab. Real-world experiments are essential to confirm the model's predictions.
+        2.  **Sensitivity Analysis:** Consider performing additional experiments slightly varying the recommended optimal settings to understand the sensitivity of your system. This helps in identifying robust operating ranges.
+        3.  **Practical Constraints:** Always consider any practical or safety constraints in your lab when implementing these optimal settings. The model provides a theoretical optimum, but real-world limitations may necessitate minor adjustments.
+        4.  **Iterative Optimization:** If initial validation is successful, consider using these results to refine your input ranges and perform another round of optimization for even finer tuning.
+        {custom_prompt_addition}
         """
     return "Placeholder explanation: LLM analysis type not recognized or data missing."
 
-# Initialize Dash app
+
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.LUX, dbc.icons.FONT_AWESOME],
-                meta_tags=[{'name': 'viewport', 'content': 'width=device-width, initial-scale=1.0'}],
-                suppress_callback_exceptions=True)
+                  meta_tags=[{'name': 'viewport', 'content': 'width=device-width, initial-scale=1.0'}],
+                  suppress_callback_exceptions=True)
 app.title = "R&D Experiment Analysis Platform"
 
-# ========= Helper Functions =========
 def parse_contents(contents, filename):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
     try:
-        if 'csv' in filename:
-            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-        elif 'xls' in filename or 'xlsx' in filename:
-            df = pd.read_excel(io.BytesIO(decoded))
-        else:
-            return html.Div(['Invalid file type. Please upload CSV or Excel.'])
+        if 'csv' in filename: df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+        elif 'xls' in filename or 'xlsx' in filename: df = pd.read_excel(io.BytesIO(decoded))
+        else: return html.Div(['Invalid file type. Please upload CSV or Excel.'])
         return df
     except Exception as e:
         print(f"Error parsing file {filename}: {e}")
         return html.Div([f'There was an error processing this file: {str(e)}'])
 
 def process_dataframe_for_ui(df, filename_display):
-    """Helper function to generate UI components from a DataFrame."""
-    # Limit display to first N rows for performance if df is large
     display_df = df.head(50) if len(df) > 50 else df
-    
     table = dash_table.DataTable(
         data=display_df.to_dict('records'),
         columns=[{'name': i, 'id': i} for i in display_df.columns],
-        page_size=8,
-        style_table={'overflowX': 'auto', 'width': '100%'},
-        style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 
-                    'minWidth': '100px', 'width': '150px', 'maxWidth': '200px', 
-                    'whiteSpace': 'normal', 'textOverflow': 'ellipsis'}, # Added ellipsis
+        page_size=8, style_table={'overflowX': 'auto', 'width': '100%'},
+        style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'minWidth': '100px', 'width': '150px', 'maxWidth': '200px', 'whiteSpace': 'normal', 'textOverflow': 'ellipsis'},
         style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold', 'borderBottom': '2px solid #dee2e6'},
-        style_data={'borderBottom': '1px solid #dee2e6'},
-        sort_action='native',
-        filter_action='native',
-        tooltip_data=[ # Add tooltips for truncated cell data
-            {
-                column: {'value': str(value), 'type': 'markdown'}
-                for column, value in row.items()
-            } for row in display_df.to_dict('records')
-        ],
+        style_data={'borderBottom': '1px solid #dee2e6'}, sort_action='native', filter_action='native',
+        tooltip_data=[{column: {'value': str(value), 'type': 'markdown'} for column, value in row.items()} for row in display_df.to_dict('records')],
         tooltip_duration=None
     )
     column_options = [{'label': col, 'value': col} for col in df.columns]
     role_assignment_ui = html.Div([
         dbc.Label("Input Variables (X):", html_for='dropdown-input-vars', className="fw-bold mt-3"),
         dcc.Dropdown(id='dropdown-input-vars', options=column_options, multi=True, placeholder="Select features/factors", className="mb-2"),
-        dbc.Tooltip("These are the independent variables that you control or measure in your experiment.", target="dropdown-input-vars"),
-
         dbc.Label("Target Output Variable (Y):", html_for='dropdown-output-var', className="fw-bold"),
         dcc.Dropdown(id='dropdown-output-var', options=column_options, multi=False, placeholder="Select the single output to analyze/optimize", className="mb-2"),
-        dbc.Tooltip("This is the dependent variable you are trying to predict or optimize.", target="dropdown-output-var"),
-
         dbc.Label("Missing Value Strategy:", html_for='dropdown-missing-strategy', className="fw-bold"),
-        dcc.Dropdown(
-            id='dropdown-missing-strategy',
-            options=[
-                {'label': 'Drop Rows with Missing Data', 'value': 'drop_rows'},
-                {'label': 'Impute with Mean (Numeric only)', 'value': 'mean'}, # Changed value
-                {'label': 'Impute with Median (Numeric only)', 'value': 'median'}, # Changed value
-                {'label': 'Impute with Mode (Numeric & Categorical)', 'value': 'most_frequent'}, # Changed value
-            ],
-            value='drop_rows', clearable=False, className="mb-3",
-            placeholder="Select how to handle missing data"
-        ),
-        dbc.Tooltip("Choose a strategy to handle any missing values in your dataset. 'Impute with Mode' will use mode for numerical if chosen.", target="dropdown-missing-strategy"),
-
+        dcc.Dropdown(id='dropdown-missing-strategy', options=[
+            {'label': 'Drop Rows with Missing Data', 'value': 'drop_rows'},
+            {'label': 'Impute with Mean (Numeric only)', 'value': 'mean'},
+            {'label': 'Impute with Median (Numeric only)', 'value': 'median'},
+            {'label': 'Impute with Mode (Numeric & Categorical)', 'value': 'most_frequent'},
+        ], value='drop_rows', clearable=False, className="mb-3"),
         dbc.Label("Ignore Columns (Optional):", html_for='dropdown-ignore-vars', className="fw-bold"),
         dcc.Dropdown(id='dropdown-ignore-vars', options=column_options, multi=True, placeholder="Select columns to exclude", className="mb-3"),
-        dbc.Tooltip("Columns selected here will be excluded from the analysis.", target="dropdown-ignore-vars"),
-
-        dbc.Button(children=[html.I(className="fas fa-cogs me-2"), "Confirm Setup & Proceed to Analysis"], id="btn-confirm-setup", color="primary", className="mt-3 w-100 btn-lg")
+        dbc.Button(children=[html.I(className="fas fa-cogs me-2"), "Confirm Setup & Proceed"], id="btn-confirm-setup", color="primary", className="mt-3 w-100 btn-lg")
     ])
-    status_message = dbc.Alert(f"Successfully loaded: {filename_display}. Displaying first {len(display_df)} of {len(df)} rows.", color="success", duration=4000) if len(df) > 50 else dbc.Alert(f"Successfully loaded: {filename_display}", color="success", duration=4000)
+    status_message = dbc.Alert(f"Loaded: {filename_display}. Displaying first {len(display_df)} of {len(df)} rows.", color="success", duration=4000) if len(df) > 50 else dbc.Alert(f"Loaded: {filename_display}", color="success", duration=4000)
     stored_data = df.to_json(date_format='iso', orient='split')
     return status_message, table, stored_data, role_assignment_ui
 
-# ========= App Layout =========
-app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children=[ # Added bg-light and min-vh-100
-    dcc.Store(id='store-raw-data'),
-    dcc.Store(id='store-column-roles'), 
-    dcc.Store(id='store-exploration-results'),
-    dcc.Store(id='store-optimization-results'),
-    dcc.Store(id='store-current-analysis-type'),
-    dcc.Store(id='store-progress-text'), 
-    dcc.Interval(id='progress-interval', interval=300, n_intervals=0, disabled=True), # Slightly slower interval
-    dcc.Store(id='store-progress-steps', data=[]),
-    dcc.Store(id='store-current-step-index', data=0),
+app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children=[
+    dcc.Store(id='store-raw-data'), dcc.Store(id='store-column-roles'),
+    dcc.Store(id='store-exploration-results'), dcc.Store(id='store-optimization-results'),
+    dcc.Store(id='store-current-analysis-type'), dcc.Store(id='store-progress-text'), # Will store single current message
+    dcc.Interval(id='progress-interval', interval=500, n_intervals=0, disabled=True), # Slightly longer interval
+    dcc.Store(id='store-progress-steps', data=[]), # Stores the list of all step names
+    dcc.Store(id='store-current-step-index', data=0), # Stores the index of the current step
+    dcc.Store(id='active-tab-store', data='tab-data-upload'),
 
-    dbc.Row(dbc.Col(html.H1(children=[html.I(className="fas fa-flask me-2"), "R&D Experiment Analysis Platform"], className="text-center my-4 display-5 text-primary fw-bold"), width=12)), # Adjusted size and weight
-    
-    # Guided Workflow / Stepper
-    dbc.Row([
-        dbc.Col(
-            dbc.Nav(
-                [
-                    dbc.NavItem(dbc.NavLink("1. Data & Setup", active=True, href="#", id="nav-data-setup", className="fw-medium fs-5 p-2")), # Increased padding and font size
-                    dbc.NavItem(dbc.NavLink("2. Analysis & Results", active=False, href="#", id="nav-analysis", disabled=True, className="fw-medium fs-5 p-2")),
-                    dbc.NavItem(dbc.NavLink("3. AI Insights & Suggestions", active=False, href="#", id="nav-suggestions", disabled=True, className="fw-medium fs-5 p-2")),
-                ],
-                pills=True, # Changed to pills for better visual separation
-                className="nav-pills justify-content-center mb-4 shadow-sm bg-white rounded p-2" # Added shadow, bg, rounded
-            ), width=12
-        )
-    ]),
-
-    dbc.Row(dbc.Col(html.Div(id='global-progress-message', className="text-center my-3"), width=12)), # Removed custom styling, will rely on Progress component
-    
-    # Main content area using dbc.Card for better structure
+    dbc.Row(dbc.Col(html.H1(children=[html.I(className="fas fa-flask me-2"), "R&D Experiment Analysis Platform"], className="text-center my-4 display-5 text-primary fw-bold"), width=12)),
+    dbc.Row(dbc.Col(dbc.Nav([
+        dbc.NavItem(dbc.NavLink("1. Data & Setup", active=True, href="#", id="nav-data-setup", className="fw-medium fs-5 p-2")),
+        dbc.NavItem(dbc.NavLink("2. Analysis & Results", active=False, href="#", id="nav-analysis", disabled=True, className="fw-medium fs-5 p-2")),
+        dbc.NavItem(dbc.NavLink("3. AI Insights & Suggestions", active=False, href="#", id="nav-suggestions", disabled=True, className="fw-medium fs-5 p-2")),
+    ], pills=True, className="nav-pills justify-content-center mb-4 shadow-sm bg-white rounded p-2"), width=12)),
+    dbc.Row(dbc.Col(html.Div(id='global-progress-message', className="my-3"), width=12)), # Progress message div
     dbc.Card(dbc.CardBody([
-        dbc.Tabs(id="main-tabs", active_tab="tab-data-upload", className="mb-3", children=[ # Removed style display none
-                dbc.Tab(label="Data & Setup", tab_id="tab-data-upload", children=[
-                    dbc.Card(dbc.CardBody([
-                        dbc.Row([
-                            dbc.Col([
-                                html.H4(children=[html.I(className="fas fa-upload me-2"), "Upload Experiment Data"], className="mb-3 text-secondary"),
-                                dcc.Upload(
-                                    id='upload-data',
-                                    children=html.Div(['Drag and Drop or ', html.A('Select Files (.csv, .xlsx)')]),
-                                    style={
-                                        'width': '100%', 'height': '80px', 'lineHeight': '80px',
-                                        'borderWidth': '2px', 'borderStyle': 'dashed',
-                                        'borderRadius': '8px', 'textAlign': 'center', 'margin': '10px 0',
-                                        'backgroundColor': '#f8f9fa', 'borderColor': '#adb5bd' # Softer border
-                                    },
-                                    multiple=False, className="mb-2"
-                                ),
-                                html.Div("Or", className="text-center my-2 small text-muted"),
-                                dbc.Button(children=[html.I(className="fas fa-database me-2"),"Load Demo Dataset (LFA Data)"], id="btn-load-demo", color="info", outline=True, className="w-100 mb-3"), # Changed color
-                                html.Div(id='output-data-upload-status', className="mt-2"),
-                                html.Div(id='output-datatable-div', className="mt-3", style={'maxHeight': '350px', 'overflowY': 'auto', 'overflowX': 'auto', 'border': '1px solid #dee2e6', 'borderRadius': '5px'}) # Added border
-                            ], md=7, className="p-3 border-end"),
-                            dbc.Col([
-                                html.H4(children=[html.I(className="fas fa-sliders-h me-2"), "Experiment Configuration"], className="mb-3 text-secondary"),
-                                dbc.Label("Select Experiment Type:", html_for='dropdown-experiment-type', className="fw-bold"),
-                                dcc.Dropdown(
-                                    id='dropdown-experiment-type',
-                                    options=[
-                                        {'label': 'Exploration (Screening - Which inputs matter?)', 'value': 'exploration'},
-                                        {'label': 'Optimization (RSM-like - What are the best settings?)', 'value': 'optimization'}
-                                    ],
-                                    value='exploration', clearable=False, className="mb-3"
-                                ),
-                                dbc.Tooltip("Choose the type of analysis you want to perform on your data.", target="dropdown-experiment-type"),
-                                html.Div(id='column-role-assignment-div') 
-                            ], md=5, className="p-3")
-                        ])
-                    ]), className="mt-0 shadow-sm") # Removed mt-3 to align with tab, added shadow
-                ]),
-                dbc.Tab(label="Analysis & Results", tab_id="tab-analysis", id="tab-analysis-actual", disabled=True, children=[ # Renamed id to avoid conflict
-                    dbc.Card(dbc.CardBody([
-                        html.Div(id='analysis-content-div', className="p-3"),
-                        dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights"], id="btn-goto-suggestions-expl", color="info", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'}), # Centered button
-                        dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights"], id="btn-goto-suggestions-opt", color="success", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'})  # Centered button
-                    ]), className="mt-0 shadow-sm")
-                ]),
-                dbc.Tab(label="AI Insights & Suggestions", tab_id="tab-suggestions", id="tab-suggestions-actual", disabled=True, children=[ # Renamed id
-                    dbc.Card(dbc.CardBody([
-                        html.Div(id='suggestions-content-div', className="p-3"),
-                        html.Hr(),
-                        html.H5(children=[html.I(className="fas fa-edit me-2"), "Customize AI Prompt (Optional)"], className="mt-4 text-secondary"),
-                        html.P("Refine the instructions for the AI to get more tailored insights.", className="small text-muted"),
-                        dcc.Textarea(
-                            id='custom-llm-prompt-input',
-                            value='Focus on the implications for protein stability and synthetic biology applications.',
-                            style={'width': '100%', 'height': 100, 'borderRadius': '8px', 'border': '1px solid #ced4da', 'padding': '10px'}, # Reduced height
-                            className="mb-3"
-                        ),
-                        dbc.Tooltip("Add specific instructions or questions for the AI to consider when generating insights.", target="custom-llm-prompt-input"),
-                        dbc.Button(children=[html.I(className="fas fa-sync-alt me-2"), "Regenerate AI Insights"], id="btn-regenerate-llm", color="secondary", className="w-100")
-                    ]), className="mt-0 shadow-sm")
-                ]),
-            ])
-    ]), className="mt-3 shadow-lg rounded"), # Added shadow to main card
-
+        html.Div(id="tab-content", className="p-3"),
+        dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights (Exploration)"], id="btn-goto-suggestions-expl", color="info", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'}),
+        dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights (Optimization)"], id="btn-goto-suggestions-opt", color="success", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'})
+    ]), className="mt-3 shadow-lg rounded"),
     dbc.Row(dbc.Col(html.P("Powered by AutoML and Generative AI", className="text-center text-muted mt-5 small"), width=12))
 ])
 
-# ========= Callbacks =========
-
-# Callback to update NavLinks based on active tab and disabled state of underlying tabs
+# Callback to render tab content based on active_tab
 @app.callback(
-    [Output('nav-data-setup', 'active'),
-     Output('nav-analysis', 'active'),
-     Output('nav-suggestions', 'active'),
-     Output('nav-analysis', 'disabled'), # This will control the NavLink's disabled state
-     Output('nav-suggestions', 'disabled')],# This will control the NavLink's disabled state
-    [Input('main-tabs', 'active_tab'),
-     Input('tab-analysis-actual', 'disabled'),  # Listen to the actual tab's disabled state
-     Input('tab-suggestions-actual', 'disabled')] # Listen to the actual tab's disabled state
+    Output('tab-content', 'children'),
+    Input('active-tab-store', 'data'),
+    State('store-raw-data', 'data'),
+    State('store-column-roles', 'data'),
+    State('store-current-analysis-type', 'data'),
+    State('store-exploration-results', 'data'),
+    State('store-optimization-results', 'data'),
 )
-def update_nav_links(active_main_tab, analysis_tab_is_disabled, suggestions_tab_is_disabled):
-    return (
-        active_main_tab == 'tab-data-upload',
-        active_main_tab == 'tab-analysis',
-        active_main_tab == 'tab-suggestions',
-        analysis_tab_is_disabled, # NavLink disabled if corresponding actual tab is disabled
-        suggestions_tab_is_disabled # NavLink disabled if corresponding actual tab is disabled
-    )
+def render_tab_content(active_tab, raw_data_json, column_roles, analysis_type, exploration_data, optimization_data):
+    data_setup_content = dbc.Card(dbc.CardBody([dbc.Row([
+        dbc.Col([
+            html.H4(children=[html.I(className="fas fa-upload me-2"), "Upload Experiment Data"], className="mb-3 text-secondary"),
+            dcc.Upload(id='upload-data', children=html.Div(['Drag & Drop or ', html.A('Select Files')]), style={'width': '100%', 'height': '80px', 'lineHeight': '80px', 'borderWidth': '2px', 'borderStyle': 'dashed', 'borderRadius': '8px', 'textAlign': 'center', 'margin': '10px 0', 'backgroundColor': '#f8f9fa', 'borderColor': '#adb5bd'}, multiple=False, className="mb-2"),
+            html.Div("Or", className="text-center my-2 small text-muted"),
+            dbc.Button(children=[html.I(className="fas fa-database me-2"),"Load Demo Data"], id="btn-load-demo", color="info", outline=True, className="w-100 mb-3"),
+            html.Div(id='output-data-upload-status', className="mt-2"),
+            html.Div(id='output-datatable-div', className="mt-3", style={'maxHeight': '350px', 'overflowY': 'auto', 'overflowX': 'auto', 'border': '1px solid #dee2e6', 'borderRadius': '5px'})
+        ], md=7, className="p-3 border-end"),
+        dbc.Col([
+            html.H4(children=[html.I(className="fas fa-sliders-h me-2"), "Experiment Configuration"], className="mb-3 text-secondary"),
+            dbc.Label("Experiment Type:", html_for='dropdown-experiment-type', className="fw-bold"),
+            dcc.Dropdown(id='dropdown-experiment-type',
+                         options=[
+                             {'label': 'Exploration (Identify Key Factors)', 'value': 'exploration'},
+                             {'label': 'Optimization (Find Best Settings)', 'value': 'optimization'}
+                         ],
+                         value='exploration', clearable=False, className="mb-3"),
+            html.Div(id='column-role-assignment-div')
+        ], md=5, className="p-3")])]), className="mt-0 shadow-sm")
 
+    if active_tab == 'tab-data-upload':
+        return data_setup_content
+    elif active_tab == 'tab-analysis':
+        # Pass all required arguments to render_analysis_tab_content
+        return render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json)
+    elif active_tab == 'tab-suggestions':
+        # Pass all required arguments to render_suggestions_tab_content
+        # The '0' is for n_clicks_regenerate as it's not the trigger here.
+        return render_suggestions_tab_content(active_tab, 0, analysis_type, exploration_data, optimization_data, None)
+    return html.Div("Select a tab")
 
-# Callback to switch tabs when NavLink is clicked
 @app.callback(
-    Output('main-tabs', 'active_tab', allow_duplicate=True),
-    [Input('nav-data-setup', 'n_clicks'),
-     Input('nav-analysis', 'n_clicks'),
-     Input('nav-suggestions', 'n_clicks')],
-    [State('nav-analysis', 'disabled'), # Check if the navlink itself is disabled
-     State('nav-suggestions', 'disabled')],
+    [Output('nav-data-setup', 'active'), Output('nav-analysis', 'active'), Output('nav-suggestions', 'active'),
+     Output('nav-analysis', 'disabled'), Output('nav-suggestions', 'disabled')],
+    [Input('active-tab-store', 'data')],
+    [State('nav-analysis', 'disabled'), State('nav-suggestions', 'disabled')]
+)
+def update_nav_links(active_main_tab, nav_analysis_disabled, nav_suggestions_disabled):
+    return active_main_tab == 'tab-data-upload', \
+           active_main_tab == 'tab-analysis', \
+           active_main_tab == 'tab-suggestions', \
+           nav_analysis_disabled, \
+           nav_suggestions_disabled
+
+@app.callback(
+    Output('active-tab-store', 'data', allow_duplicate=True),
+    [Input('nav-data-setup', 'n_clicks'), Input('nav-analysis', 'n_clicks'), Input('nav-suggestions', 'n_clicks')],
+    [State('nav-analysis', 'disabled'), State('nav-suggestions', 'disabled')],
     prevent_initial_call=True
 )
 def switch_tabs_from_nav(n_data, n_analysis, n_suggestions, analysis_nav_disabled, suggestions_nav_disabled):
     ctx = callback_context
-    if not ctx.triggered:
-        return dash.no_update
-    
+    if not ctx.triggered: return dash.no_update
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    if button_id == 'nav-data-setup':
-        return 'tab-data-upload'
-    elif button_id == 'nav-analysis' and not analysis_nav_disabled: # Only switch if not disabled
-        return 'tab-analysis'
-    elif button_id == 'nav-suggestions' and not suggestions_nav_disabled: # Only switch if not disabled
-        return 'tab-suggestions'
+    if button_id == 'nav-data-setup': return 'tab-data-upload'
+    elif button_id == 'nav-analysis' and not analysis_nav_disabled: return 'tab-analysis'
+    elif button_id == 'nav-suggestions' and not suggestions_nav_disabled: return 'tab-suggestions'
     return dash.no_update
 
-
-# Callback to update global progress message
 @app.callback(
     Output('global-progress-message', 'children'),
-    Input('progress-interval', 'n_intervals'), # Triggered by interval
-    State('store-progress-text', 'data'), # Main text comes from here (e.g. "Running AutoML...")
-    State('progress-interval', 'disabled'), # To hide when not active
-    State('store-progress-steps', 'data'), # List of detailed steps
-    State('store-current-step-index', 'data') # Current index in the detailed steps
+    Input('progress-interval', 'n_intervals'),
+    [State('store-progress-steps', 'data'), State('store-current-step-index', 'data'),
+     State('progress-interval', 'disabled'), State('store-current-analysis-type', 'data')] # Added analysis type for context
 )
-def update_progress_message(n, progress_text, interval_disabled, progress_steps, current_step_index):
-    if interval_disabled or not progress_text: # If interval is off or no base text, show nothing
+def update_progress_display(n, progress_steps, current_step_index, interval_disabled, analysis_type):
+    if interval_disabled or not progress_steps:
         return ""
 
-    # If there are detailed steps, show them with a progress bar
-    if progress_steps and current_step_index < len(progress_steps):
-        current_step_text = progress_steps[current_step_index]
-        # Calculate percentage for the detailed step progress
-        progress_percentage = ((current_step_index + 1) / len(progress_steps)) * 100 if len(progress_steps) > 0 else 0
-        
-        return html.Div([
-            dbc.Spinner(size="sm", color="primary", className="me-2 align-middle"), 
-            html.Span(f"{current_step_text}", className="me-3 align-middle", style={'color': '#495057'}), # Darker text
-            dbc.Progress(value=progress_percentage, style={'height': '20px', 'fontSize': '0.75rem'}, className="align-middle d-inline-flex w-50", striped=True, animated=True)
-        ], className="d-flex align-items-center justify-content-center")
+    log_display_elements = []
+    is_complete = current_step_index >= len(progress_steps) -1
     
-    # Fallback to simple spinner and text if no detailed steps
+    analysis_name = str(analysis_type).capitalize() if analysis_type else "Analysis"
+
+    for i, step_text in enumerate(progress_steps):
+        if i < current_step_index:
+            prefix = "✅ "
+            className = "mb-0 small text-muted"
+        elif i == current_step_index and not is_complete:
+            prefix = "⏳ "
+            className = "mb-0 fw-bold text-primary"
+        elif i == current_step_index and is_complete: # Last step is also the current, and it's complete
+            prefix = "✅ "
+            className = "mb-0 small"
+        else: # Future steps
+            prefix = "⚪️ "
+            className = "mb-0 small text-secondary"
+        log_display_elements.append(html.P(f"{prefix}{step_text}", className=className))
+
+    progress_percentage = ((current_step_index + 1) / len(progress_steps)) * 100 if len(progress_steps) > 0 else 0
+    if is_complete:
+        progress_percentage = 100
+
+    header_icon = html.I(className="fas fa-check-circle text-success me-2") if is_complete else dbc.Spinner(size="sm", color="primary", className="me-2 align-middle")
+    header_text = f"{analysis_name} Complete!" if is_complete else f"{analysis_name} in Progress..."
+
     return html.Div([
-        dbc.Spinner(size="sm", color="primary", className="me-2"), 
-        html.Span(progress_text, style={'color': '#495057'})
-    ])
-
-
-# Callback to advance progress bar steps (simulated)
-# This callback's sole purpose is to increment the step index when the interval is active.
-# It doesn't directly set the text, but allows the update_progress_message callback to show the next step.
-@app.callback(
-    Output('store-current-step-index', 'data', allow_duplicate=True), # allow_duplicate as it's also an output in run_automl
-    Input('progress-interval', 'n_intervals'), # Triggered by interval
-    State('store-current-step-index', 'data'), # Current index
-    State('store-progress-steps', 'data'), # Total steps available
-    State('progress-interval', 'disabled'), # Only advance if interval is enabled
-    prevent_initial_call=True
-)
-def advance_progress_step(n_intervals, current_step_index, progress_steps, interval_disabled):
-    if not interval_disabled and progress_steps:
-        # Simulate work being done for the current step, then advance.
-        # In a real async setup, this would be more complex. Here, we just increment.
-        # Let's assume each interval tick means some progress on the current step,
-        # and we advance to the next step after a few ticks, or based on external trigger.
-        # For simplicity here, we'll just let the main AutoML callback set the index.
-        # This interval callback is more for showing continuous activity.
-        # The actual step advancement logic is better handled by the AutoML callbacks themselves
-        # by updating 'store-current-step-index' directly when a logical step completes.
-        # So, this callback might not be strictly needed if AutoML callbacks update the index.
-        # However, if we want a "dummy" progress on each step, it could be used.
-        # For now, let's make it so it doesn't interfere with AutoML's direct index updates.
-        # It will mostly serve to re-trigger the 'update_progress_message'.
-        return dash.no_update # Let other callbacks manage the index primarily.
-    return dash.no_update
+        html.Div([header_icon, html.Span(header_text, className="fw-bold", style={'color': '#495057'})], className="d-flex align-items-center mb-2"),
+        dbc.Progress(value=progress_percentage, striped=True, animated=not is_complete, label=f"Step {min(current_step_index + 1, len(progress_steps))}/{len(progress_steps)}", style={'height': '20px', 'fontSize': '0.8rem'}, className="mb-2"),
+        dbc.Card(dbc.CardBody(log_display_elements, className="p-2"), className="mt-2 shadow-sm", style={'maxHeight': '200px', 'overflowY': 'auto', 'fontSize': '0.75rem', 'fontFamily': 'monospace', 'backgroundColor': '#f8f9fa'})
+    ], className="text-center")
 
 
 @app.callback(
-    [Output('output-data-upload-status', 'children'),
-     Output('output-datatable-div', 'children'),
-     Output('store-raw-data', 'data'),
-     Output('column-role-assignment-div', 'children')],
-    [Input('upload-data', 'contents'),
-     Input('btn-load-demo', 'n_clicks')],
-    [State('upload-data', 'filename')],
-    prevent_initial_call=True
+    [Output('output-data-upload-status', 'children'), Output('output-datatable-div', 'children'),
+     Output('store-raw-data', 'data'), Output('column-role-assignment-div', 'children')],
+    [Input('upload-data', 'contents'), Input('btn-load-demo', 'n_clicks')],
+    State('upload-data', 'filename'), prevent_initial_call=True
 )
 def handle_data_input(contents, n_clicks_demo, filename):
-    ctx = dash.callback_context
-    if not ctx.triggered:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
+    ctx = callback_context
+    if not ctx.triggered: return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     triggered_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    df = None
-    filename_display = None
-
+    df, filename_display = None, None
     if triggered_id == 'upload-data' and contents:
         df_or_error = parse_contents(contents, filename)
-        if isinstance(df_or_error, html.Div): 
-            return dbc.Alert(df_or_error.children[0], color="danger", className="mt-2"), "", None, ""
-        df = df_or_error
-        filename_display = filename
+        if isinstance(df_or_error, html.Div): return dbc.Alert(df_or_error.children[0], color="danger", duration=4000), "", None, ""
+        df, filename_display = df_or_error, filename
     elif triggered_id == 'btn-load-demo' and n_clicks_demo:
         try:
             df = pd.read_csv(io.StringIO(DEMO_DATA_CSV_STRING))
             filename_display = "lfa_random_data.csv (Demo)"
-        except Exception as e:
-            print(f"Error loading demo data: {e}")
-            return dbc.Alert(f"Error loading demo data: {str(e)}", color="danger", className="mt-2"), "", None, ""
-    
-    if df is None:
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
+        except Exception as e: return dbc.Alert(f"Error loading demo data: {e}", color="danger", duration=4000), "", None, ""
+    if df is None: return dash.no_update, dash.no_update, dash.no_update, dash.no_update
     return process_dataframe_for_ui(df, filename_display)
 
 @app.callback(
-    [Output('store-column-roles', 'data'),
-     Output('main-tabs', 'active_tab', allow_duplicate=True), # Allow duplicate for main_tabs
-     Output('tab-analysis-actual', 'disabled'), # Control actual tab disabled state
-     Output('tab-suggestions-actual', 'disabled'), 
-     Output('output-data-upload-status', 'children', allow_duplicate=True),
-     Output('store-current-analysis-type', 'data')],
-    [Input('btn-confirm-setup', 'n_clicks')],
-    [State('dropdown-experiment-type', 'value'), State('dropdown-input-vars', 'value'),
-     State('dropdown-output-var', 'value'), State('dropdown-ignore-vars', 'value'),
-     State('dropdown-missing-strategy', 'value'),
-     State('store-raw-data', 'data')],
+    [Output('store-column-roles', 'data'), Output('active-tab-store', 'data', allow_duplicate=True),
+     Output('nav-analysis', 'disabled', allow_duplicate=True),
+     Output('nav-suggestions', 'disabled', allow_duplicate=True),
+     Output('output-data-upload-status', 'children', allow_duplicate=True), Output('store-current-analysis-type', 'data')],
+    Input('btn-confirm-setup', 'n_clicks'),
+    [State('dropdown-experiment-type', 'value'), State('dropdown-input-vars', 'value'), State('dropdown-output-var', 'value'),
+     State('dropdown-ignore-vars', 'value'), State('dropdown-missing-strategy', 'value'), State('store-raw-data', 'data')],
     prevent_initial_call=True
 )
 def confirm_setup_and_proceed(n_clicks, exp_type, inputs, output_var, ignored, missing_strategy, raw_data_json):
-    if not n_clicks or not raw_data_json:
-        # Disable analysis and suggestions tabs, keep current tab, no status update, no analysis type
-        return dash.no_update, dash.no_update, True, True, dash.no_update, dash.no_update
+    if not n_clicks or not raw_data_json: return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    alert_msg = None
+    if not exp_type: alert_msg = dbc.Alert("⚠️ Please select an Experiment Type.", color="warning", duration=4000)
+    elif not inputs or not output_var: alert_msg = dbc.Alert("⚠️ Select input(s) and target.", color="warning", duration=4000)
+    elif output_var in inputs: alert_msg = dbc.Alert("⚠️ Target cannot be an Input.", color="danger", duration=4000)
     
-    if not inputs or not output_var:
-        # Validation failed: show warning, keep tabs disabled
-        alert_msg = dbc.Alert("⚠️ Please select input(s) and a target output.", color="warning", duration=5000, className="mt-2")
+    if alert_msg:
         return dash.no_update, dash.no_update, True, True, alert_msg, dash.no_update
 
-    if output_var in inputs:
-        # Validation failed: show error, keep tabs disabled
-        alert_msg = dbc.Alert("⚠️ Target Output cannot be an Input Variable.", color="danger", duration=5000, className="mt-2")
-        return dash.no_update, dash.no_update, True, True, alert_msg, dash.no_update
-    
-    # Validation passed
-    column_roles = {
-        'inputs': inputs, 
-        'target_for_analysis': output_var, 
-        'ignored': ignored or [],
-        'missing_strategy': missing_strategy # e.g. 'drop_rows', 'mean', 'median', 'most_frequent'
-    }
-    success_msg = dbc.Alert(f"Setup Confirmed for {exp_type.capitalize()}. Proceed to 'Analysis & Results'.", color="info", duration=4000, className="mt-2")
-    # Store roles, switch to analysis tab, enable analysis tab, keep suggestions disabled, show success, store type
-    return column_roles, "tab-analysis", False, True, success_msg, exp_type
-
+    column_roles = {'inputs': inputs, 'target_for_analysis': output_var, 'ignored': ignored or [], 'missing_strategy': missing_strategy}
+    return column_roles, "tab-analysis", False, True, dbc.Alert(f"Setup Confirmed for {exp_type.capitalize()}.", color="success", duration=3000), exp_type
 
 @app.callback(
-    Output('analysis-content-div', 'children'),
-    Input('main-tabs', 'active_tab'), # Trigger when analysis tab becomes active
-    State('store-current-analysis-type', 'data'), 
-    State('store-column-roles', 'data'),
-    State('store-raw-data', 'data') # Added to check if data exists
+    Output('analysis-content-div', 'children'), 
+    Input('active-tab-store', 'data'), 
+    [State('store-current-analysis-type', 'data'), State('store-column-roles', 'data'), State('store-raw-data', 'data')],
 )
-def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json):
-    if active_tab != 'tab-analysis' or not analysis_type or not column_roles or not raw_data_json:
-        # If not on analysis tab, or setup is incomplete, show placeholder
-        return html.Div([
-            html.P("Complete data upload and experiment configuration on the 'Data & Setup' tab first."),
-            html.P("Once confirmed, this section will allow you to run the analysis.")
-        ], className="text-center text-muted p-4")
+def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json): 
+    if active_tab != 'tab-analysis': 
+        return html.Div() 
+
+    if not raw_data_json:
+        return dbc.Alert("No data uploaded. Please go back to 'Data & Setup' tab.", color="warning")
+    
+    if not column_roles or not isinstance(column_roles, dict) or \
+       not column_roles.get('target_for_analysis') or not column_roles.get('inputs') or not analysis_type:
+        return dbc.Alert("Column roles or analysis type not defined. Please complete setup on 'Data & Setup' tab.", color="warning")
 
     target_column = column_roles.get('target_for_analysis')
-    df = pd.read_json(raw_data_json, orient='split') # Load data to check target type
-
-    # Validate target column type for numeric operations
+    df = pd.read_json(raw_data_json, orient='split')
     if not pd.api.types.is_numeric_dtype(df[target_column]):
-        return dbc.Alert(f"Error: The selected target output variable '{target_column}' is not numeric. "
-                         "AutoML regression models require a numeric target. Please select a different target variable.", 
-                         color="danger", className="mt-2")
+        return dbc.Alert(f"Error: Target column '{target_column}' must be numeric for regression analysis.", color="danger")
     
-    # Validate input features for appropriate types (numeric or categorical/string)
-    problematic_features = []
-    if column_roles.get('inputs'):
-        for col in column_roles['inputs']:
-            # Allow numeric, string/object (categorical). Disallow boolean, datetime unless explicitly handled.
-            if not (pd.api.types.is_numeric_dtype(df[col]) or \
-                    pd.api.types.is_string_dtype(df[col]) or \
-                    pd.api.types.is_object_dtype(df[col])): # object can be categorical
-                problematic_features.append(col)
-    
-    if problematic_features:
-        return dbc.Alert(f"Error: The following input variables have data types unsuitable for this analysis (must be numeric or categorical text): "
-                         f"{', '.join(problematic_features)}. Please check your data or feature selection.",
-                         color="danger", className="mt-2")
+    for col in column_roles.get('inputs', []):
+        if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+            return dbc.Alert(f"Error: Input column '{col}' has an unsupported data type ({df[col].dtype}). Please ensure features are numeric, string/object (for categorical), or boolean.", color="danger")
 
 
     if analysis_type == 'exploration':
         return html.Div([
-            html.H3(f"Exploration Analysis for Target: {target_column}", className="mb-3 text-info"),
-            html.P("Identify key input variables impacting the selected output using AutoML. This involves training multiple regression models and evaluating their performance and feature importances."),
-            dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run AutoML for Exploration"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow-sm"),
-            dbc.Tooltip("Initiate the AutoML process to discover the most influential factors.", target="btn-run-exploration-automl"),
-            dcc.Loading(id="loading-exploration", type="default", children=[html.Div(id="exploration-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")]) # Added styling
+            html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
+            html.P("This analysis will evaluate multiple machine learning models to identify which input variables (features) have the most significant impact on your selected target output. It helps in understanding key drivers and relationships within your data."),
+            dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
+            dcc.Loading(id="loading-exploration", type="default", children=[html.Div(id="exploration-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")])
         ])
     elif analysis_type == 'optimization':
-        # Check if there are any numerical features for optimization ranges
         numerical_inputs = [col for col in column_roles.get('inputs', []) if pd.api.types.is_numeric_dtype(df[col])]
-
         return html.Div([
-            html.H3(f"Optimization Analysis for Target: {target_column}", className="mb-3 text-success"),
-            html.P(f"Find optimal settings for inputs to maximize or minimize '{target_column}'. This uses the best model from an AutoML run as a surrogate for a grid search over input ranges."),
+            html.H3(f"Optimization Analysis: Targeting '{target_column}'", className="mb-3 text-success"),
+            html.P(f"This analysis aims to find the optimal combination of input variable settings to either maximize or minimize your selected target output: '{target_column}'. It uses the best model identified from an initial evaluation to predict outcomes over a range of settings."),
             dbc.Label("Optimization Goal:", className="fw-bold"),
             dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
-            dbc.Tooltip("Select whether you want to maximize or minimize the target output.", target="dropdown-optimization-goal"),
-            html.P("Note: For numerical inputs, ranges are inferred from your data's min/max values. Categorical inputs will be tested with their unique values.", className="small text-muted") if numerical_inputs else html.P("Note: Categorical inputs will be tested with their unique values. No numerical inputs detected for range-based optimization.", className="small text-muted"),
-            dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run AutoML for Optimization"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow-sm"),
-            dbc.Tooltip("Start the AutoML process to find the ideal experimental conditions.", target="btn-run-optimization-automl"),
-            dcc.Loading(id="loading-optimization", type="default", children=[html.Div(id="optimization-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")]) # Added styling
+            html.P("Note: For numerical inputs, ranges for optimization are inferred from your data's min/max values. Categorical inputs are tested using their unique values present in the dataset.", className="small text-muted") if numerical_inputs else html.P("Note: Categorical inputs will be tested with their unique values. No numerical inputs detected for range-based optimization.", className="small text-muted"),
+            dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
+            dcc.Loading(id="loading-optimization", type="default", children=[html.Div(id="optimization-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")])
         ])
-    return "Analysis type not recognized or setup incomplete."
+    return dbc.Alert("Selected analysis type not recognized or setup incomplete.", color="warning")
 
-
-# Progress callback function for AutoML runs (to be called by the AutoML functions)
-# This function is a bit conceptual in Dash's context for synchronous operations.
-# The actual update to the store components will happen in the main callback that calls the AutoML.
-def update_automl_progress_display(progress_steps_list, current_step_idx, analysis_id_trigger):
-    """
-    This function is intended to be called by the long-running AutoML process.
-    In Dash, direct updates from a synchronous function to Store components that trigger other callbacks
-    is complex. Instead, the main callback invoking AutoML will update these stores.
-    This function signature is a placeholder for how one might structure it if using background callbacks.
-    For this app, the main @app.callback for exploration/optimization will set these.
-    """
-    # This would typically update dcc.Store components if it were a background callback.
-    # For now, it's a conceptual link. The actual updates are:
-    # 'store-progress-steps' gets progress_steps_list
-    # 'store-current-step-index' gets current_step_idx
-    # 'progress-interval' disabled = False
-    # 'store-progress-text' gets a generic "Running..." message
-    # The 'analysis_id_trigger' isn't directly used here but shows it's tied to a specific run.
-    pass
-
-
-# Callback to run Exploration AutoML and display results
 @app.callback(
-    [Output('exploration-results-area', 'children'),
-     Output('store-exploration-results', 'data'),
-     Output('tab-suggestions-actual', 'disabled', allow_duplicate=True), 
-     Output('store-progress-text', 'data', allow_duplicate=True), # For base message
-     Output('progress-interval', 'disabled', allow_duplicate=True), # To enable/disable spinner
-     Output('store-progress-steps', 'data', allow_duplicate=True), # For detailed step list
-     Output('store-current-step-index', 'data', allow_duplicate=True), # For current step in list
+    [Output('exploration-results-area', 'children'), Output('store-exploration-results', 'data'),
+     Output('nav-suggestions', 'disabled', allow_duplicate=True),
+     Output('store-progress-text', 'data', allow_duplicate=True), 
+     Output('progress-interval', 'disabled', allow_duplicate=True), 
+     Output('store-progress-steps', 'data', allow_duplicate=True), 
+     Output('store-current-step-index', 'data', allow_duplicate=True), 
      Output('btn-goto-suggestions-expl', 'style', allow_duplicate=True)],
     Input('btn-run-exploration-automl', 'n_clicks'),
-    State('store-raw-data', 'data'),
-    State('store-column-roles', 'data'),
+    [State('store-raw-data', 'data'), State('store-column-roles', 'data')],
     prevent_initial_call=True
 )
 def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
-    if not n_clicks or not raw_data_json or not column_roles:
+    if not n_clicks:
         return dash.no_update, dash.no_update, True, None, True, [], 0, {'display': 'none'}
-    
-    # Initial progress state
-    initial_progress_steps = ["Initializing Exploration AutoML..."] # Placeholder until real steps are known
-    
-    # Callback context to manage progress updates from within run_exploration_automl
-    # This is a simplified way to pass a "callback" to the synchronous function
-    # In a real async setup, you'd use background callbacks.
-    
-    # This list will be populated by _progress_updater
-    # It needs to be mutable and accessible by the nested function.
-    # We'll pass it to run_exploration_automl, which will call _progress_updater.
-    # The final values will be returned by this main callback.
-    # This is a bit of a workaround for Dash's synchronous callback model.
-    
-    # We will return these values at the end to update the stores
-    # This function will be called by run_automl_pipeline to update the step index
-    # It doesn't directly trigger Dash updates, but provides the values for the main callback to do so.
-    _captured_progress_steps = []
-    _captured_current_step_index = 0
 
-    def _progress_updater(steps, current_idx):
-        nonlocal _captured_progress_steps, _captured_current_step_index
-        _captured_progress_steps = steps
-        _captured_current_step_index = current_idx
-        # In a true async setup, this would trigger a client-side update.
-        # Here, we just capture the state. The main callback will return it.
-        print(f"Progress Update: Step {current_idx + 1}/{len(steps)}: {steps[current_idx]}")
+    _captured_progress_steps_list, _captured_current_idx = [], 0
+    def _progress_updater_local(steps_list, current_idx_val):
+        nonlocal _captured_progress_steps_list, _captured_current_idx
+        _captured_progress_steps_list = steps_list
+        _captured_current_idx = current_idx_val
+        if steps_list and current_idx_val < len(steps_list):
+             print(f"Expl Progress (Internal): Step {current_idx_val + 1}/{len(steps_list)}: {steps_list[current_idx_val]}")
 
+    if raw_data_json is None:
+        return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, [], 0, {'display': 'none'}
+    if column_roles is None or not isinstance(column_roles, dict) or \
+       not column_roles.get('target_for_analysis') or not column_roles.get('inputs'):
+        return dbc.Alert("Column roles not defined.", color="danger"), None, True, "Error: Setup incomplete", True, [], 0, {'display': 'none'}
 
     df = pd.read_json(raw_data_json, orient='split')
     target_column = column_roles['target_for_analysis']
     feature_columns = column_roles['inputs']
-    missing_strategy = column_roles.get('missing_strategy', 'drop_rows') # Default if not set
-
-    # Basic validation (already in render_analysis_tab_content, but good for direct calls too)
-    if not pd.api.types.is_numeric_dtype(df[target_column]):
-        error_message = f"Error: Target '{target_column}' is not numeric."
-        return dbc.Alert(error_message, color="danger"), None, True, None, True, [], 0, {'display': 'none'}
+    missing_strategy = column_roles.get('missing_strategy', 'drop_rows')
+    
+    final_progress_steps_list_for_store = []
+    final_current_step_idx_for_store = 0
+    current_step_text_for_store = "Initiating Exploration Analysis..."
 
     try:
-        # Start progress indication
-        # The run_exploration_automl will call _progress_updater which sets _captured_... vars
-        all_model_results, best_model_info, importances, shap_plot_fig, final_progress_steps = \
-            run_exploration_automl(df, target_column, feature_columns, missing_strategy, _progress_updater)
+        all_model_results, best_model_info_dict, importances, shap_plot_fig, final_progress_steps_list_for_store = \
+            run_exploration_automl(df, target_column, feature_columns, missing_strategy, _progress_updater_local)
         
-        # After run_exploration_automl completes, _captured_progress_steps and _captured_current_step_index
-        # should reflect the final state of progress from the last call to _progress_updater.
-        # We use final_progress_steps directly as it's returned.
-        # The index should be the last step.
-        final_step_index = len(final_progress_steps) -1 if final_progress_steps else 0
-
-
-    except ValueError as ve: # Catch specific errors like empty X/y
-        error_message = f"Input Data Error for Exploration: {str(ve)}"
-        print(f"ValueError in run_exploration_analysis_callback: {ve}")
-        return dbc.Alert(error_message, color="danger"), None, True, "Error", False, _captured_progress_steps, _captured_current_step_index, {'display': 'none'}
+        final_current_step_idx_for_store = len(final_progress_steps_list_for_store) - 1 if final_progress_steps_list_for_store else 0
+        current_step_text_for_store = "Exploration Complete!"
+        
     except Exception as e:
-        error_message = f"An error occurred during AutoML Exploration: {str(e)}. Check console for details."
-        print(f"Error in run_exploration_analysis_callback: {e}")
-        import traceback
-        traceback.print_exc()
-        return dbc.Alert(error_message, color="danger"), None, True, "Error", False, _captured_progress_steps, _captured_current_step_index, {'display': 'none'}
-    
-    # Extract performance metrics from the best model
-    performance_metrics = {
-        "R-squared": best_model_info.get('R-squared', 0),
-        "MAE": best_model_info.get('MAE', 0),
-        "RMSE": best_model_info.get('RMSE', 0),
-        "MAPE": best_model_info.get('MAPE', None) 
-    }
+        print(f"Error Exploration AutoML: {e}\n{traceback.format_exc()}")
+        current_step_text_for_store = "Error during exploration."
+        final_progress_steps_list_for_store = _captured_progress_steps_list
+        final_current_step_idx_for_store = _captured_current_idx
+        return dbc.Alert(f"Exploration Error: {str(e)}", color="danger"), None, True, current_step_text_for_store, True, final_progress_steps_list_for_store, final_current_step_idx_for_store, {'display': 'none'}
+
+    best_model_name = best_model_info_dict.get('Model Type', 'N/A')
+    hyperparam_defs = best_model_info_dict.get('Hyperparameter_Definitions', {})
+
+    model_def_accordion = dbc.Accordion([
+        dbc.AccordionItem([
+            html.P(MODEL_EXPLANATIONS.get(best_model_name, {}).get('description', 'No description available.')),
+            html.H6("Key Strengths:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(best_model_name, {}).get('pros', 'N/A')),
+            html.H6("Potential Weaknesses:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(best_model_name, {}).get('cons', 'N/A')),
+        ], title=f"About the {best_model_name} Model")
+    ], start_collapsed=True, className="mb-3")
+
+    hyperparam_explanations_div = [html.H6(f"Key Hyperparameters for {best_model_name}:", className="mt-3 mb-2")]
+    best_hyperparams_values = best_model_info_dict.get("Best Hyperparameters", {})
+    if best_hyperparams_values:
+        for p_name_full, p_val in best_hyperparams_values.items():
+            clean_p_name = p_name_full.split('__')[-1]
+            explanation = hyperparam_defs.get(clean_p_name, "No specific explanation available.")
+            hyperparam_explanations_div.append(html.P([html.Strong(f"{clean_p_name}:"), f" {p_val} - {explanation}"], className="small"))
+    else:
+        hyperparam_explanations_div.append(html.P("No hyperparameters tuned or available for this model.", className="small"))
+
+    best_model_details_card = dbc.Card(dbc.CardBody([
+        html.H5(f"Details for Best Model: {best_model_name}", className="card-title text-info"),
+        model_def_accordion,
+        html.P(f"Target: {target_column} | Missing Value Strategy: {missing_strategy.replace('_', ' ').title()}"),
+        *hyperparam_explanations_div
+    ]), className="mb-4 shadow-sm bg-light")
 
     kpi_cards = dbc.Row([
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model R²", className="card-title text-muted small"), html.P(f"{performance_metrics.get('R-squared', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model MAE", className="card-title text-muted small"), html.P(f"{performance_metrics.get('MAE', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model RMSE", className="card-title text-muted small"), html.P(f"{performance_metrics.get('RMSE', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Top Feature", className="card-title text-muted small"), html.P(f"{importances['feature'].iloc[0] if not importances.empty else 'N/A'}", className="card-text fs-5 text-info fw-bold text-truncate")])), md=3, className="mb-2")
-    ], className="mb-3 g-3") # Added g-3 for gutter
-    
-    # Ensure all serializable types for JSON store (NaN -> None)
-    cleaned_best_model_info = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info.items() if k != 'Pipeline'}
-    cleaned_all_model_results = []
-    for m in all_model_results:
-        cleaned_m = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in m.items() if k != 'Pipeline'}
-        cleaned_all_model_results.append(cleaned_m)
-
-    results_data_for_store = {
-        'all_model_results': cleaned_all_model_results,
-        'best_model_info': cleaned_best_model_info,
-        'importances': importances.to_dict('records') if not importances.empty else [], 
-        'performance_metrics': {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in performance_metrics.items()},
-        'target_column': target_column,
-        'missing_strategy': missing_strategy,
-        'model_info': cleaned_best_model_info # Storing best model info again for consistency with optimization
-    }
+        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model R²", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('R-squared', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
+        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model MAE", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('MAE', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
+        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model RMSE", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('RMSE', 0):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
+        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Top Feature (SHAP)", className="card-title text-muted small"), html.P(f"{importances['feature'].iloc[0] if not importances.empty else 'N/A'}", className="card-text fs-5 text-info fw-bold text-truncate")])), md=3, className="mb-2")
+    ], className="mb-3 g-3")
 
     comparison_table_data = []
-    for model_res in all_model_results: # Use original all_model_results for display formatting
+    for model_res in all_model_results:
+        model_type = model_res["Model Type"]
         row = {
-            "Model": model_res["Model Type"], # Shorter name
-            "R²": f"{model_res.get('R-squared', 0):.3f}",
-            "MAE": f"{model_res.get('MAE', 0):.3f}",
-            "RMSE": f"{model_res.get('RMSE', 0):.3f}",
-            "MAPE": f"{model_res.get('MAPE', float('nan')):.2f}%" if model_res.get('MAPE') is not None else "N/A",
-            "CV R²": f"{model_res.get('Cross-Validation R2', 0):.3f}",
-            "Time (s)": f"{model_res.get('Training Time (s)', 0):.2f}",
-            # "Hyperparameters": json.dumps(model_res.get("Best Hyperparameters", {})) # Can be too long
+            "Model": model_type, "R²": f"{model_res.get('R-squared', 0):.3f}", "MAE": f"{model_res.get('MAE', 0):.3f}",
+            "RMSE": f"{model_res.get('RMSE', 0):.3f}", "MAPE": f"{model_res.get('MAPE', float('nan')):.2f}%" if model_res.get('MAPE') is not None else "N/A",
+            "CV R²": f"{model_res.get('Cross-Validation R2', 0):.3f}", "Time (s)": f"{model_res.get('Training Time (s)', 0):.2f}",
+            "Details_action": "View" 
         }
         comparison_table_data.append(row)
 
-    model_comparison_table = html.Div([
-        html.H5("Model Comparison Summary", className="mt-4 mb-2 text-secondary"),
-        html.P(f"The best model selected is **{best_model_info.get('Model Type', 'N/A')}**.", className="mb-3 small"),
-        dash_table.DataTable(
-            id='model-comparison-table',
-            columns=[{"name": i, "id": i} for i in comparison_table_data[0].keys()] if comparison_table_data else [],
-            data=comparison_table_data,
-            sort_action='native',
-            page_size=5,
-            style_table={'overflowX': 'auto'},
-            style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
-            style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
-            style_data_conditional=[
-                {
-                    'if': {'filter_query': '{Model} = "' + best_model_info.get('Model Type', '') + '"'},
-                    'backgroundColor': '#d1ecf1', # Light blue for best model
-                    'fontWeight': 'bold'
-                }
-            ]
-        )
+    model_comparison_table_component = html.Div([
+        html.H5("All Models Evaluated", className="mt-4 mb-2 text-secondary"),
+        html.P(f"Best model: **{best_model_name}**. Click 'View' in the Details column for model information.", className="mb-3 small"),
+        dash_table.DataTable(id='model-comparison-table',
+                             columns=[ {"name": col_name, "id": col_id} for col_id, col_name in 
+                                        [("Model","Model"), ("R²","R²"), ("MAE","MAE"), ("RMSE","RMSE"), ("MAPE","MAPE"), 
+                                         ("CV R²","CV R²"), ("Time (s)","Time (s)"), ("Details_action","Details")]],
+                             data=comparison_table_data, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1,
+                             style_table={'overflowX': 'auto'}, style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
+                             style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
+                             style_data_conditional=[
+                                 {'if': {'filter_query': '{Model} = "' + best_model_name + '"'}, 'backgroundColor': '#d1ecf1', 'fontWeight': 'bold'},
+                                 {'if': {'column_id': 'Details_action'}, 'cursor': 'pointer', 'color': 'blue', 'textDecoration': 'underline'}
+                             ]),
     ], className="mb-4")
-    
-    # Simplified Best Model Details Card
-    best_model_details_card = dbc.Card(dbc.CardBody([
-        html.H5(f"Details for Best Model: {best_model_info.get('Model Type', 'N/A')}", className="card-title text-info"),
-        html.P(f"Target Analyzed: {target_column}", className="card-text"),
-        html.P(f"Missing Value Strategy: {missing_strategy.replace('_', ' ').title()}", className="card-text"),
-        html.P(f"Hyperparameters: {json.dumps(best_model_info.get('Best Hyperparameters', {}))}", className="card-text small")
-    ]), className="mb-4 shadow-sm bg-light")
-
 
     results_layout = html.Div([
         dbc.Alert(f"Exploration AutoML complete for '{target_column}'.", color="info", className="mt-2"),
-        kpi_cards, 
-        model_comparison_table,
-        best_model_details_card, # Added simplified details card
-        html.H5("Best Model Feature Importance (SHAP Values)", className="mt-4 mb-2 text-secondary"),
-        dcc.Graph(id='exploration-shap-plot-graph', figure=shap_plot_fig if shap_plot_fig else go.Figure().update_layout(title="SHAP Plot not available")),
+        kpi_cards, model_comparison_table_component, best_model_details_card,
+        html.H5("Best Model Feature Importance (SHAP)", className="mt-4 mb-2 text-secondary"),
+        dcc.Graph(id='exploration-shap-plot-graph', figure=shap_plot_fig if shap_plot_fig and shap_plot_fig.get('data') else go.Figure().update_layout(title_text="SHAP Plot not available", annotations=[dict(text="SHAP values could not be computed or model does not support SHAP.", showarrow=False)]))
     ])
-    
-    # Final progress state: text=None (or "Completed"), interval disabled, steps and index at final values
-    return results_layout, results_data_for_store, False, "Exploration Complete!", True, final_progress_steps, final_step_index, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
+    cleaned_best_model_info = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_dict.items() if k != 'Pipeline'}
+    cleaned_all_model_results = [{k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in m.items() if k != 'Pipeline'} for m in all_model_results]
+    results_data_for_store = {
+        'all_model_results': cleaned_all_model_results, 'best_model_info': cleaned_best_model_info,
+        'importances': importances.to_dict('records') if not importances.empty else [],
+        'target_column': target_column, 'missing_strategy': missing_strategy
+    }
+    return results_layout, results_data_for_store, False, current_step_text_for_store, True, final_progress_steps_list_for_store, final_current_step_idx_for_store, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
-# Callback to run Optimization AutoML and display results
 @app.callback(
-    [Output('optimization-results-area', 'children'),
-     Output('store-optimization-results', 'data'),
-     Output('tab-suggestions-actual', 'disabled', allow_duplicate=True), 
+    [Output("model-explanation-modal", "is_open"), Output("modal-model-name", "children"), Output("modal-model-desc", "children")],
+    [Input('model-comparison-table', 'active_cell'), Input('surrogate-candidates-table', 'active_cell'), Input("close-model-modal", "n_clicks")],
+    [State('model-comparison-table', 'data'), State('surrogate-candidates-table', 'data'), State("model-explanation-modal", "is_open")],
+    prevent_initial_call=True,
+)
+def toggle_model_explanation_modal(active_cell_expl, active_cell_opt, close_click, expl_table_data, opt_table_data, is_open):
+    ctx = callback_context
+    if not ctx.triggered:
+        return is_open, dash.no_update, dash.no_update
+
+    triggered_prop_id = ctx.triggered[0]['prop_id']
+    active_cell = ctx.triggered[0]['value'] 
+
+    model_name_to_show = None
+
+    if triggered_prop_id == "close-model-modal.n_clicks":
+        return False, dash.no_update, dash.no_update
+
+    if "model-comparison-table.active_cell" in triggered_prop_id and active_cell:
+        if active_cell['column_id'] == 'Details_action' and expl_table_data: # Check if data exists
+            model_name_to_show = expl_table_data[active_cell['row']]['Model']
+    elif "surrogate-candidates-table.active_cell" in triggered_prop_id and active_cell:
+        if active_cell['column_id'] == 'Details_action' and opt_table_data: # Check if data exists
+            model_name_to_show = opt_table_data[active_cell['row']]['Model']
+            
+    if model_name_to_show:
+        expl = MODEL_EXPLANATIONS.get(model_name_to_show, {})
+        desc_children = [
+            html.P(expl.get("description", "No description available.")),
+            html.H6("Key Strengths:", className="mt-3"), html.P(expl.get("pros", "N/A")),
+            html.H6("Potential Weaknesses:", className="mt-3"), html.P(expl.get("cons", "N/A"))
+        ]
+        if expl.get("hyperparameters"):
+            desc_children.append(html.H6("Key Hyperparameters:", className="mt-3"))
+            for hp, hp_desc in expl["hyperparameters"].items():
+                desc_children.append(html.P([html.Strong(f"{hp}: "), hp_desc], className="small"))
+        return True, f"{model_name_to_show} Details", desc_children
+
+    return is_open, dash.no_update, dash.no_update
+
+
+@app.callback(
+    [Output('optimization-results-area', 'children'), Output('store-optimization-results', 'data'),
+     Output('nav-suggestions', 'disabled', allow_duplicate=True),
      Output('store-progress-text', 'data', allow_duplicate=True),
-     Output('progress-interval', 'disabled', allow_duplicate=True),
+     Output('progress-interval', 'disabled', allow_duplicate=True), 
      Output('store-progress-steps', 'data', allow_duplicate=True),
-     Output('store-current-step-index', 'data', allow_duplicate=True),
+     Output('store-current-step-index', 'data', allow_duplicate=True), 
      Output('btn-goto-suggestions-opt', 'style', allow_duplicate=True)],
     Input('btn-run-optimization-automl', 'n_clicks'),
-    State('store-raw-data', 'data'),
-    State('store-column-roles', 'data'),
-    State('dropdown-optimization-goal', 'value'),
+    [State('store-raw-data', 'data'), State('store-column-roles', 'data'), State('dropdown-optimization-goal', 'value')],
     prevent_initial_call=True
 )
 def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, opt_goal):
-    if not n_clicks or not raw_data_json or not column_roles:
+    if not n_clicks:
         return dash.no_update, dash.no_update, True, None, True, [], 0, {'display': 'none'}
-        
-    _captured_progress_steps_opt = []
-    _captured_current_step_index_opt = 0
-    def _progress_updater_opt(steps, current_idx):
-        nonlocal _captured_progress_steps_opt, _captured_current_step_index_opt
-        _captured_progress_steps_opt = steps
-        _captured_current_step_index_opt = current_idx
-        print(f"Opt Progress: Step {current_idx + 1}/{len(steps)}: {steps[current_idx]}")
+
+    _captured_progress_steps_list_opt, _captured_current_idx_opt = [], 0
+    def _progress_updater_local_opt(steps_list, current_idx_val):
+        nonlocal _captured_progress_steps_list_opt, _captured_current_idx_opt
+        _captured_progress_steps_list_opt = steps_list
+        _captured_current_idx_opt = current_idx_val
+        if steps_list and current_idx_val < len(steps_list):
+            print(f"Opt Progress (Internal): Step {current_idx_val + 1}/{len(steps_list)}: {steps_list[current_idx_val]}")
+
+
+    if raw_data_json is None: return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, [], 0, {'display': 'none'}
+    if column_roles is None or not opt_goal: return dbc.Alert("Column roles or optimization goal not set.", color="danger"), None, True, "Error: Setup incomplete", True, [], 0, {'display': 'none'}
 
     df = pd.read_json(raw_data_json, orient='split')
     target_column = column_roles['target_for_analysis']
-    feature_columns = column_roles['inputs'] # These are the original selected input features
+    feature_columns = column_roles['inputs']
     missing_strategy = column_roles.get('missing_strategy', 'drop_rows')
 
-    # Basic validation
-    if not pd.api.types.is_numeric_dtype(df[target_column]):
-        error_message = f"Error: Target '{target_column}' is not numeric for Optimization."
-        return dbc.Alert(error_message, color="danger"), None, True, None, True, [], 0, {'display': 'none'}
+    final_progress_steps_list_for_store_opt = []
+    final_current_step_idx_for_store_opt = 0
+    current_step_text_for_store_opt = "Initiating Optimization Analysis..."
 
     try:
-        # Define feature_ranges for numerical features based on the original data (df)
-        # Ensure only numerical features present in `feature_columns` are included
-        feature_ranges = {
-            col: {'min': df[col].min(), 'max': df[col].max()} 
-            for col in feature_columns 
-            if pd.api.types.is_numeric_dtype(df[col]) and col in df.columns # Check col exists in df
-        }
-        
-        all_model_results_opt, best_model_info_opt, importances_opt, shap_plot_fig_opt, final_progress_steps_opt, \
+        feature_ranges = {col: {'min': df[col].min(), 'max': df[col].max()} for col in feature_columns if pd.api.types.is_numeric_dtype(df[col]) and col in df.columns and df[col].nunique() > 1} 
+
+        all_model_results_opt, best_model_info_opt_dict, importances_opt, shap_plot_fig_opt, final_progress_steps_list_for_store_opt, \
         optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
-        response_fig, surrogate_tree_text, model_info_opt_summary = \
-            run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges, missing_strategy, _progress_updater_opt)
+        response_fig, surrogate_tree_text, model_info_opt_summary, surrogate_tree_plot_src = \
+            run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges, missing_strategy, _progress_updater_local_opt)
         
-        final_step_index_opt = len(final_progress_steps_opt) -1 if final_progress_steps_opt else 0
+        final_current_step_idx_for_store_opt = len(final_progress_steps_list_for_store_opt) - 1 if final_progress_steps_list_for_store_opt else 0
+        current_step_text_for_store_opt = "Optimization Complete!"
 
-    except ValueError as ve:
-        error_message = f"Input Data Error for Optimization: {str(ve)}"
-        print(f"ValueError in run_optimization_analysis_callback: {ve}")
-        return dbc.Alert(error_message, color="danger"), None, True, "Error", False, _captured_progress_steps_opt, _captured_current_step_index_opt, {'display': 'none'}
     except Exception as e:
-        error_message = f"An error occurred during AutoML Optimization: {str(e)}. Check console for details."
-        print(f"Error in run_optimization_analysis_callback: {e}")
-        import traceback
-        traceback.print_exc()
-        return dbc.Alert(error_message, color="danger"), None, True, "Error", False, _captured_progress_steps_opt, _captured_current_step_index_opt, {'display': 'none'}
+        print(f"Error Optimization AutoML: {e}\n{traceback.format_exc()}")
+        current_step_text_for_store_opt = "Error during optimization."
+        final_progress_steps_list_for_store_opt = _captured_progress_steps_list_opt
+        final_current_step_idx_for_store_opt = _captured_current_idx_opt
+        return dbc.Alert(f"Optimization Error: {str(e)}", color="danger"), None, True, current_step_text_for_store_opt, True, final_progress_steps_list_for_store_opt, final_current_step_idx_for_store_opt, {'display': 'none'}
+
+    optimal_settings_kpi_cards = [
+        dbc.Col(dbc.Card(dbc.CardBody([
+            html.H6(f"Optimal {k}", className="card-title text-muted small text-truncate", style={'fontSize': '0.8rem'}),
+            html.P(f"{v:.3f}" if isinstance(v, (float, np.number)) and not np.isnan(v) else str(v), className="card-text fs-5 text-success fw-bold")
+        ])), width=6, lg=3, className="mb-2") for k, v in optimal_settings.items()
+    ]
+    predicted_target_kpi = dbc.Col(dbc.Card(dbc.CardBody([
+        html.H5(f"Predicted {target_column} ({opt_goal}d)", className="card-title text-muted", style={'fontSize': '0.9rem'}),
+        html.P(f"{predicted_target:.3f}" if not np.isnan(predicted_target) else "N/A", className="card-text fs-3 fw-bold text-success"),
+        html.Small(f"95% CI: {predicted_target_lower:.3f} - {predicted_target_upper:.3f}" if not np.isnan(predicted_target_lower) and not np.isnan(predicted_target_upper) else "CI N/A", className="text-muted")
+    ])), width=12, lg=6, className="mb-2 align-self-stretch")
+
+    surrogate_model_name = model_info_opt_summary.get('Model Type', 'N/A')
+    surrogate_hyperparam_defs = model_info_opt_summary.get('Hyperparameter_Definitions', {})
+    surrogate_hyperparam_expl_div = [html.H6(f"Key Hyperparameters for Surrogate Model ({surrogate_model_name}):", className="mt-3 mb-2")]
     
-    kpi_cards_list = []
-    # KPIs for the best surrogate model
-    kpi_cards_list.append(dbc.Col(dbc.Card(dbc.CardBody([html.H5("Surrogate Model R²", className="card-title text-muted small"), html.P(f"{best_model_info_opt.get('R-squared', 0):.3f}", className="card-text fs-4 text-success fw-bold")])), md=4, className="mb-2"))
-    kpi_cards_list.append(dbc.Col(dbc.Card(dbc.CardBody([html.H5("Surrogate MAE", className="card-title text-muted small"), html.P(f"{best_model_info_opt.get('MAE', 0):.3f}", className="card-text fs-4 text-success fw-bold")])), md=4, className="mb-2"))
-    kpi_cards_list.append(dbc.Col(dbc.Card(dbc.CardBody([html.H5("Surrogate Top Feature", className="card-title text-muted small"), html.P(f"{importances_opt['feature'].iloc[0] if not importances_opt.empty else 'N/A'}", className="card-text fs-5 text-success fw-bold text-truncate")])), md=4, className="mb-2"))
+    sur_hyperparams_values = model_info_opt_summary.get("Hyperparameters", {})
+    if sur_hyperparams_values:
+        for p_name_full, p_val in sur_hyperparams_values.items():
+            clean_p_name = p_name_full.split('__')[-1]
+            explanation = surrogate_hyperparam_defs.get(clean_p_name, "No specific explanation.")
+            surrogate_hyperparam_expl_div.append(html.P([html.Strong(f"{clean_p_name}:"), f" {p_val} - {explanation}"], className="small"))
+    else:
+        surrogate_hyperparam_expl_div.append(html.P("No hyperparameters tuned or available for this model.", className="small"))
 
-    # Optimal settings and predicted target
-    optimal_settings_display = dbc.Card(dbc.CardBody([
-        html.H5(f"Optimal Settings to {opt_goal.capitalize()} {target_column}", className="card-title text-success"),
-        *[html.P(f"{k}: {v:.3f}" if isinstance(v, (float, np.number)) and not np.isnan(v) else f"{k}: {v}", className="card-text mb-1") for k,v in optimal_settings.items()],
-        html.Hr(),
-        html.H6(f"Predicted {target_column}: {predicted_target:.3f}", className="fw-bold"),
-        html.P(f"(95% CI: {predicted_target_lower:.3f} - {predicted_target_upper:.3f})", className="small text-muted")
-    ]), className="mb-3 shadow-sm")
-
-    # Ensure all serializable types for JSON store (NaN -> None)
-    cleaned_best_model_info_opt = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_opt.items() if k != 'Pipeline'}
-    cleaned_all_model_results_opt = []
-    for m_opt in all_model_results_opt:
-        cleaned_m_opt = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in m_opt.items() if k != 'Pipeline'}
-        cleaned_all_model_results_opt.append(cleaned_m_opt)
-    
-    cleaned_model_info_opt_summary = {k: (None if isinstance(v, float) and np.isnan(v) else v if not isinstance(v, tuple) else str(v)) for k,v in model_info_opt_summary.items()}
-
-
-    results_data_for_store = {
-        'all_model_results': cleaned_all_model_results_opt,
-        'best_model_info': cleaned_best_model_info_opt, # Info about the best surrogate model
-        'optimal_settings': {k: (None if isinstance(v, float) and np.isnan(v) else v) for k,v in optimal_settings.items()},
-        'predicted_target': None if isinstance(predicted_target, float) and np.isnan(predicted_target) else predicted_target,
-        'predicted_target_lower': None if isinstance(predicted_target_lower, float) and np.isnan(predicted_target_lower) else predicted_target_lower,
-        'predicted_target_upper': None if isinstance(predicted_target_upper, float) and np.isnan(predicted_target_upper) else predicted_target_upper,
-        'target_column': target_column, 
-        'goal': opt_goal, 
-        'feature_columns': feature_columns,
-        'missing_strategy': missing_strategy,
-        'importances': importances_opt.to_dict('records') if not importances_opt.empty else [],
-        'model_info': cleaned_model_info_opt_summary, # Summary of the surrogate model used
-        'surrogate_tree_text': surrogate_tree_text
-    }
-    
-    # Model comparison table for optimization (surrogate model candidates)
-    comparison_table_data_opt = []
-    for model_res in all_model_results_opt:
-        row = {
-            "Model": model_res["Model Type"],
-            "R²": f"{model_res.get('R-squared',0):.3f}",
-            "MAE": f"{model_res.get('MAE',0):.3f}",
-            "RMSE": f"{model_res.get('RMSE',0):.3f}",
-            "MAPE": f"{model_res.get('MAPE', float('nan')):.2f}%" if model_res.get('MAPE') is not None else "N/A",
-            "CV R²": f"{model_res.get('Cross-Validation R2',0):.3f}",
-            "Time (s)": f"{model_res.get('Training Time (s)',0):.2f}",
-        }
-        comparison_table_data_opt.append(row)
-
-    model_comparison_table_opt_layout = html.Div([
-        html.H5("Surrogate Model Candidates Comparison", className="mt-4 mb-2 text-secondary"),
-        html.P(f"The best model selected as surrogate was **{best_model_info_opt.get('Model Type', 'N/A')}**.", className="mb-3 small"),
-        dash_table.DataTable(
-            id='model-comparison-table-opt',
-            columns=[{"name": i, "id": i} for i in comparison_table_data_opt[0].keys()] if comparison_table_data_opt else [],
-            data=comparison_table_data_opt,
-            sort_action='native', page_size=5, style_table={'overflowX': 'auto'},
-            style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
-            style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
-            style_data_conditional=[{'if': {'filter_query': '{Model} = "' + best_model_info_opt.get('Model Type', '') + '"'}, 'backgroundColor': '#d4edda', 'fontWeight': 'bold'}]
-        )
-    ], className="mb-4")
-    
-    # Surrogate Model Details Card
     surrogate_model_details_card = dbc.Card(dbc.CardBody([
-        html.H5(f"Details for Surrogate Model: {model_info_opt_summary.get('Model Type', 'N/A')}", className="card-title text-success"),
-        html.P(f"Optimization Goal: {opt_goal.capitalize()} {target_column}", className="card-text"),
-        html.P(f"Hyperparameters: {json.dumps(model_info_opt_summary.get('Hyperparameters', {}))}", className="card-text small")
+        html.H5(f"Details for Surrogate Model: {surrogate_model_name}", className="card-title text-success"),
+        dbc.Accordion([dbc.AccordionItem([
+            html.P(MODEL_EXPLANATIONS.get(surrogate_model_name, {}).get('description', 'N/A')),
+            html.H6("Strengths:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(surrogate_model_name, {}).get('pros', 'N/A')),
+            html.H6("Weaknesses:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(surrogate_model_name, {}).get('cons', 'N/A')),
+        ], title=f"About the {surrogate_model_name} Model")], start_collapsed=True, className="mb-3"),
+        *surrogate_hyperparam_expl_div
     ]), className="mb-4 shadow-sm bg-light")
 
+    comparison_table_data_opt = []
+    for model_res in all_model_results_opt: 
+        model_type_opt = model_res["Model Type"]
+        row_opt = {
+            "Model": model_type_opt, "R²": f"{model_res.get('R-squared', 0):.3f}", "MAE": f"{model_res.get('MAE', 0):.3f}",
+            "RMSE": f"{model_res.get('RMSE', 0):.3f}", "MAPE": f"{model_res.get('MAPE', float('nan')):.2f}%" if model_res.get('MAPE') is not None else "N/A",
+            "CV R²": f"{model_res.get('Cross-Validation R2', 0):.3f}", "Time (s)": f"{model_res.get('Training Time (s)', 0):.2f}",
+            "Details_action": "View"
+        }
+        comparison_table_data_opt.append(row_opt)
 
-    response_surface_explanation = html.P(
-        "Response Surface/Curve visualizes the predicted relationship between one or two key numerical inputs and the target, holding other inputs at their optimal or mean values.",
-        className="small text-muted mt-1 mb-3"
-    )
+    surrogate_candidates_table_component = html.Div([
+        html.H5("All Models Evaluated (for Surrogate Selection)", className="mt-4 mb-2 text-secondary"),
+        html.P(f"The model chosen as surrogate was **{surrogate_model_name}**. Click 'View' for model details.", className="mb-3 small"),
+        dash_table.DataTable(id='surrogate-candidates-table',
+                             columns=[ {"name": col_name, "id": col_id} for col_id, col_name in 
+                                        [("Model","Model"), ("R²","R²"), ("MAE","MAE"), ("RMSE","RMSE"), ("MAPE","MAPE"), 
+                                         ("CV R²","CV R²"), ("Time (s)","Time (s)"), ("Details_action","Details")]],
+                             data=comparison_table_data_opt, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1,
+                             style_table={'overflowX': 'auto'}, style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
+                             style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
+                             style_data_conditional=[
+                                 {'if': {'filter_query': '{Model} = "' + surrogate_model_name + '"'},'backgroundColor': '#d4edda', 'fontWeight': 'bold'},
+                                 {'if': {'column_id': 'Details_action'}, 'cursor': 'pointer', 'color': 'blue', 'textDecoration': 'underline'}
+                              ]),
+    ], className="mb-4")
 
-    plot_div = []
-    if response_fig and response_fig.get('data'): # Check if figure has data
-        plot_div.extend([
-            html.H5("Predicted Response Surface/Curve", className="mt-4 mb-2 text-secondary"),
-            response_surface_explanation,
-            dcc.Graph(id='optimization-response-surface-plot-graph', figure=response_fig)
-        ])
+    surrogate_tree_plot_layout = html.Div()
+    if surrogate_tree_plot_src:
+        surrogate_tree_plot_layout = html.Div([
+            html.H5("Visual Surrogate Decision Tree (Simplified Logic)", className="mt-4 mb-2 text-secondary"),
+            html.P("This tree approximates the surrogate model's behavior for easier interpretation. It shows key decision paths based on transformed features.", className="small text-muted"),
+            html.Img(src=surrogate_tree_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px', 'backgroundColor': 'white', 'padding':'10px', 'display':'block', 'marginLeft':'auto', 'marginRight':'auto'})
+        ], className="mb-4 text-center")
     else:
-         plot_div.append(html.P("Response surface plot is not available (e.g., fewer than 1-2 varied numerical features).", className="text-muted small mt-3"))
-
-
-    shap_plot_div = []
-    if shap_plot_fig_opt and shap_plot_fig_opt.get('data'): # Check if figure has data
-        shap_plot_div.extend([
-            html.H5("Surrogate Model Feature Importance (SHAP)", className="mt-4 mb-2 text-secondary"),
-            dcc.Graph(id='optimization-shap-plot-graph', figure=shap_plot_fig_opt)
-        ])
-    
-    surrogate_tree_layout = html.Div()
-    if surrogate_tree_text and surrogate_tree_text != "Not applicable (no transformed data or features for tree visualization)." and surrogate_tree_text != "Not applicable (no numerical features or transformed data for tree visualization).":
-        surrogate_tree_layout = html.Div([
-            html.H5("Surrogate Tree Logic (Simplified Rules)", className="mt-4 mb-2 text-secondary"),
-            html.P("This simplified decision tree approximates the surrogate model's predictions, offering interpretable rules.", className="small text-muted"),
-            dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text, style={'whiteSpace': 'pre-wrap', 'wordBreak': 'break-all', 'backgroundColor': '#f8f9fa', 'padding': '15px', 'borderRadius': '8px', 'fontFamily': 'monospace', 'maxHeight': '300px', 'overflowY': 'auto'})), className="mb-4 shadow-sm")
+        surrogate_tree_plot_layout = html.Div([
+            html.H5("Surrogate Tree Logic (Textual)", className="mt-4 mb-2 text-secondary"),
+            html.P("Visual plot not available or generation failed. Textual rules based on transformed features:", className="small text-muted"),
+            dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text if surrogate_tree_text else "Tree text not available.", style={'whiteSpace': 'pre-wrap', 'maxHeight': '200px', 'overflowY':'auto', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px'})), className="mb-4")
         ])
 
     results_layout = html.Div([
         dbc.Alert(f"Optimization AutoML complete for '{target_column}'. Goal: {opt_goal.capitalize()}.", color="success", className="mt-2"),
-        dbc.Row(kpi_cards_list, className="mb-3 g-3"), 
-        optimal_settings_display,
-        model_comparison_table_opt_layout,
+        dbc.Row(optimal_settings_kpi_cards + [predicted_target_kpi], className="mb-3 g-3 justify-content-center"),
+        surrogate_candidates_table_component,
         surrogate_model_details_card,
-        *plot_div,
-        *shap_plot_div, 
-        surrogate_tree_layout,
+        html.Div(dcc.Graph(figure=response_fig), className="mb-3") if response_fig and response_fig.get('data') else html.P("Response surface plot not available (requires at least one varied numerical feature).", className="text-muted small text-center"),
+        html.Div(dcc.Graph(figure=shap_plot_fig_opt), className="mb-3") if shap_plot_fig_opt and shap_plot_fig_opt.get('data') else html.P("SHAP plot for surrogate model not available.", className="text-muted small text-center"),
+        surrogate_tree_plot_layout
     ])
-    
-    return results_layout, results_data_for_store, False, "Optimization Complete!", True, final_progress_steps_opt, final_step_index_opt, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
+
+    cleaned_best_model_info_opt = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_opt_dict.items() if k != 'Pipeline'}
+    cleaned_all_model_results_opt = [{k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in m.items() if k != 'Pipeline'} for m in all_model_results_opt]
+    cleaned_model_info_opt_summary = {k: (None if isinstance(v, float) and np.isnan(v) else v if not isinstance(v, tuple) else str(v)) for k,v in model_info_opt_summary.items()}
+    results_data_for_store = {
+        'all_model_results': cleaned_all_model_results_opt, 'best_model_info': cleaned_best_model_info_opt, 
+        'optimal_settings': {k: (None if isinstance(v, float) and np.isnan(v) else v) for k,v in optimal_settings.items()},
+        'predicted_target': None if isinstance(predicted_target, float) and np.isnan(predicted_target) else predicted_target,
+        'predicted_target_lower': None if isinstance(predicted_target_lower, float) and np.isnan(predicted_target_lower) else predicted_target_lower,
+        'predicted_target_upper': None if isinstance(predicted_target_upper, float) and np.isnan(predicted_target_upper) else predicted_target_upper,
+        'target_column': target_column, 'goal': opt_goal, 'feature_columns': feature_columns, 'missing_strategy': missing_strategy,
+        'importances': importances_opt.to_dict('records') if not importances_opt.empty else [], 
+        'model_info': cleaned_model_info_opt_summary, 
+        'surrogate_tree_text': surrogate_tree_text,
+        'surrogate_tree_plot_src': surrogate_tree_plot_src
+    }
+    return results_layout, results_data_for_store, False, current_step_text_for_store_opt, True, final_progress_steps_list_for_store_opt, final_current_step_idx_for_store_opt, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
 
-# Callback to handle explicit tab switching via buttons on Analysis tab
-@app.callback(
-    Output('main-tabs', 'active_tab', allow_duplicate=True),
-    [Input('btn-goto-suggestions-expl', 'n_clicks'),
-     Input('btn-goto-suggestions-opt', 'n_clicks')],
-    prevent_initial_call=True
-)
-def switch_to_suggestions_tab_from_analysis(n1_expl, n2_opt):
+@app.callback(Output('active-tab-store', 'data', allow_duplicate=True),
+              [Input('btn-goto-suggestions-expl', 'n_clicks'), Input('btn-goto-suggestions-opt', 'n_clicks')],
+              prevent_initial_call=True)
+def switch_to_suggestions_tab_from_analysis(n1, n2):
     ctx = callback_context
     if not ctx.triggered: return dash.no_update
-    
-    # Whichever button was clicked, switch to suggestions tab
     return "tab-suggestions"
 
-
-@app.callback(
-    Output('suggestions-content-div', 'children', allow_duplicate=True),
-    [Input('main-tabs', 'active_tab'), # Trigger when suggestions tab is active
-     Input('btn-regenerate-llm', 'n_clicks')], # Trigger on regenerate button
-    [State('store-current-analysis-type', 'data'), 
-     State('store-exploration-results', 'data'), 
-     State('store-optimization-results', 'data'),
-     State('custom-llm-prompt-input', 'value')],
-    prevent_initial_call=True # Important to prevent firing on app load
+@app.callback(Output('suggestions-content-div', 'children'), 
+              [Input('active-tab-store', 'data'),Input('btn-regenerate-llm', 'n_clicks')],
+              [State('store-current-analysis-type', 'data'), State('store-exploration-results', 'data'),
+               State('store-optimization-results', 'data'), State('custom-llm-prompt-input', 'value')],
 )
 def render_suggestions_tab_content(active_tab_id, n_clicks_regenerate, analysis_type, exploration_data, optimization_data, custom_prompt_value):
     ctx = callback_context
-    triggered_id = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else None
+    triggered_by_tab_switch = active_tab_id == 'tab-suggestions' and ctx.triggered and ctx.triggered[0]['prop_id'] == 'active-tab-store.data'
+    triggered_by_button = ctx.triggered and ctx.triggered[0]['prop_id'] == 'btn-regenerate-llm.n_clicks'
 
-    # Only proceed if the suggestions tab is active OR the regenerate button was clicked
-    if not (active_tab_id == 'tab-suggestions' or triggered_id == 'btn-regenerate-llm'):
-        return dash.no_update 
-    
-    if not analysis_type: 
-        return dbc.Alert("Complete an analysis on Tab 2 first to generate AI insights.", color="warning", className="m-3")
-    
+    if not (triggered_by_tab_switch or triggered_by_button):
+        return html.Div() 
+
+    if not analysis_type:
+        return dbc.Alert("Analysis type not set. Please complete an analysis on Tab 2 first.", color="warning")
+
     header_text, llm_input_data = "", None
-    if analysis_type == 'exploration' and exploration_data:
+    current_analysis_type_for_llm = analysis_type 
+
+    if current_analysis_type_for_llm == 'exploration':
+        if not exploration_data or not isinstance(exploration_data, dict) or not exploration_data.get('target_column'):
+            return dbc.Alert("Exploration analysis results are not available. Please run the analysis on Tab 2.", color="warning")
         header_text = f"AI Insights for Exploration: {exploration_data.get('target_column', 'N/A')}"
-        llm_input_data = exploration_data
-    elif analysis_type == 'optimization' and optimization_data:
+        llm_input_data = exploration_data 
+    elif current_analysis_type_for_llm == 'optimization':
+        if not optimization_data or not isinstance(optimization_data, dict) or not optimization_data.get('target_column'):
+            return dbc.Alert("Optimization analysis results are not available. Please run the analysis on Tab 2.", color="warning")
         header_text = f"AI Insights for Optimization: {optimization_data.get('target_column', 'N/A')} ({optimization_data.get('goal', 'N/A')})"
-        llm_input_data = optimization_data
+        llm_input_data = optimization_data 
     else:
-        return dbc.Alert("No analysis results available for suggestions. Please run an analysis on Tab 2 first.", color="warning", className="m-3")
-    
-    # Show loading spinner while generating
-    loading_spinner = dcc.Loading(type="dots", children=[html.Div(id="llm-output-placeholder")]) # Temporary placeholder for output
+        return dbc.Alert("No analysis results available or analysis type not recognized.", color="danger")
+
+    if llm_input_data is None: 
+        return dbc.Alert("Failed to prepare data for AI insights.", color="danger")
 
     try:
-        llm_explanation_markdown = generate_explanation_llm(analysis_type, llm_input_data, custom_prompt_value)
+        llm_explanation_markdown = generate_explanation_llm(current_analysis_type_for_llm.capitalize(), llm_input_data, custom_prompt_value)
     except Exception as e:
-        print(f"Error generating LLM explanation: {e}")
-        return dbc.Alert(f"Error generating AI insights: {str(e)}", color="danger", className="m-3")
+        print(f"Error generating AI insights: {e}\n{traceback.format_exc()}")
+        return dbc.Alert(f"Error generating AI insights: {str(e)}", color="danger")
 
     return html.Div([
         html.H3(children=[html.I(className="fas fa-brain me-2"), header_text], className="mb-3 text-primary"),
-        dcc.Markdown(llm_explanation_markdown, className="border p-3 bg-white rounded shadow-sm", style={'lineHeight': '1.7', 'fontSize': '0.95rem'}) # Enhanced styling
+        dcc.Markdown(llm_explanation_markdown, className="border p-3 bg-white rounded shadow-sm", style={'lineHeight': '1.7', 'fontSize': '0.95rem'})
     ], className="p-2")
 
 
