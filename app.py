@@ -266,14 +266,14 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         X_train_processed_df = pd.DataFrame(X_train_processed, columns=feature_names_out)
         X_test_processed_df = pd.DataFrame(X_test_processed, columns=feature_names_out)
         
-        best_model_pipeline_obj = None # Use a different name to avoid conflict with a potential function name
+        best_model_pipeline_obj = None 
 
         for i, model_config in enumerate(MODELS_TO_EVALUATE):
             model_name = model_config['name']
             estimator = model_config['estimator']
             param_grid_for_estimator = {k.replace('regressor__', ''): v for k, v in model_config['param_grid'].items()}
             
-            progress_callback(current_progress_steps, i + 2) # +2 for "Validating" and "Preprocessing"
+            progress_callback(current_progress_steps, i + 2) 
             
             start_time = time.time()
             current_best_estimator_for_model = None; best_params_for_model = {}; best_cv_score_for_model = -float('inf')
@@ -321,8 +321,8 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 best_model_info_dict = model_result
                 best_model_pipeline_obj = final_pipeline_for_model
         
-        current_progress_idx_offset = 2 + total_models # Validating + Preprocessing + All models
-        progress_callback(current_progress_steps, current_progress_idx_offset) # "Evaluating Best Model..."
+        current_progress_idx_offset = 2 + total_models 
+        progress_callback(current_progress_steps, current_progress_idx_offset) 
         
         if best_model_pipeline_obj and not X_train_processed_df.empty and best_model_info_dict:
             best_regressor = best_model_pipeline_obj.named_steps['regressor']
@@ -341,7 +341,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
             except Exception as e_resid: print(f"Error Residuals plot: {e_resid}")
 
-            progress_callback(current_progress_steps, current_progress_idx_offset + 1) # "Calculating SHAP..."
+            progress_callback(current_progress_steps, current_progress_idx_offset + 1) 
             
             shap_values_for_plot = None; X_shap_for_plot = None
             n_shap_samples = min(100, X_train_processed_df.shape[0])
@@ -369,14 +369,14 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     importances_df = pd.DataFrame({'feature': X_shap_for_plot.columns, 'importance': mean_abs_shap}).sort_values(by='importance', ascending=False)
                 except Exception as e_imp_df: print(f"Error SHAP importances_df: {e_imp_df}")
         
-        current_progress_idx_offset += 2 # For "Evaluating..." and "Calculating SHAP..."
+        current_progress_idx_offset += 2 
 
         if analysis_type == 'exploration':
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Finalizing..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
             return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig
 
         elif analysis_type == 'optimization':
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Generating Surrogate Tree..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
             if not X_train_processed_df.empty and best_model_pipeline_obj:
                 best_regressor_for_surrogate = best_model_pipeline_obj.named_steps['regressor']
                 y_hat_train_surrogate = best_regressor_for_surrogate.predict(X_train_processed_df)
@@ -391,7 +391,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 except Exception as e_tree_plot: print(f"Error surrogate tree plot: {e_tree_plot}")
             
             current_progress_idx_offset +=1 
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Optimizing (Grid Search)..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
             optimal_settings = {col: "N/A" for col in feature_columns} 
 
             grid_points_num_orig = {col: np.linspace(feature_ranges[col]['min'], feature_ranges[col]['max'], 5) for col in numerical_features if col in feature_ranges and feature_ranges[col]['min'] != feature_ranges[col]['max']}
@@ -428,7 +428,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 except Exception as e_opt_pred: print(f"Error optimization prediction: {e_opt_pred}")
 
             current_progress_idx_offset +=1
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Evaluating Optimal Settings..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
             
             try:
                 varied_numerical_features_for_plot_orig = [col for col in numerical_features if col in feature_columns and col in grid_points_num_orig and len(grid_points_num_orig[col]) > 1]
@@ -463,7 +463,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             except Exception as e_resp_surf: print(f"Error response surface plot: {e_resp_surf}")
 
             current_progress_idx_offset +=1
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Generating Optimization Visualizations..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
 
             model_info_summary = {}
             if best_model_info_dict: 
@@ -477,7 +477,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     "Optimization Goal": optimization_goal, "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(best_model_info_dict.get('Model Type', ''), {}).get('hyperparameters', {})}
             
             current_progress_idx_offset +=1
-            progress_callback(current_progress_steps, current_progress_idx_offset) # "Finalizing Results..."
+            progress_callback(current_progress_steps, current_progress_idx_offset) 
             return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, \
                    optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
                    response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
@@ -485,8 +485,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         
     except Exception as main_pipeline_error:
         print(f"CRITICAL ERROR in AutoML pipeline: {main_pipeline_error}\n{traceback.format_exc()}")
-        progress_callback(current_progress_steps, len(current_progress_steps) -1) # Mark as finished, possibly error state
-        # Ensure all expected return values are provided, even if they are defaults/placeholders
+        progress_callback(current_progress_steps, len(current_progress_steps) -1) 
         if analysis_type == 'exploration':
             return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig
         elif analysis_type == 'optimization':
@@ -494,7 +493,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                    optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
                    response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
                    actual_vs_predicted_fig, residuals_vs_predicted_fig
-        else: # Should not happen
+        else: 
             raise main_pipeline_error
 
 
@@ -517,11 +516,11 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
             'target_column': results_data.get('target_column'),
             'best_model_type': best_model_name,
             'best_model_r_squared': results_data.get('best_model_info', {}).get('R-squared'),
-            'top_features_shap': [f"{f['feature']} (Importance: {f['importance']:.3f})" for f in results_data.get('importances', [])[:3]], # Changed to include importance
+            'top_features_shap': [f"{f['feature']} (Importance: {f['importance']:.3f})" for f in results_data.get('importances', [])[:3]], 
             'missing_strategy': results_data.get('missing_strategy', 'default')
         }
     elif analysis_type == "Optimization":
-        best_model_name = results_data.get('model_info', {}).get('Model Type', 'N/A') # Surrogate model
+        best_model_name = results_data.get('model_info', {}).get('Model Type', 'N/A') 
         prompt_data = {
             'target_column': results_data.get('target_column'),
             'optimization_goal': results_data.get('goal'),
@@ -792,7 +791,7 @@ def switch_tabs_from_nav(n_data, n_analysis, n_suggestions, analysis_nav_disable
 )
 def update_progress_display(n_intervals, progress_steps, current_step_index, interval_disabled, analysis_type):
     if not progress_steps: 
-        return html.Div() # Initially empty, or a very minimal placeholder if preferred
+        return html.Div() 
 
     log_display_elements = []
     is_complete = current_step_index >= (len(progress_steps) - 1) if progress_steps else True
@@ -887,72 +886,84 @@ def confirm_setup_and_proceed(n_clicks, exp_type, inputs, output_var, ignored, m
     [State('store-current-analysis-type', 'data'), State('store-column-roles', 'data'), State('store-raw-data', 'data')],
 )
 def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json): 
-    if active_tab != 'tab-analysis': 
-        return html.Div([
-            # Ensure placeholders for tables exist if they are inputs to global callbacks
-            html.Div(id='exploration-results-area', style={'display':'none'}),
-            html.Div(id='optimization-results-area', style={'display':'none'}),
-            # Add empty tables with IDs if they are direct inputs to callbacks
-            # This ensures their IDs are in the layout from the start.
-            html.Div(dash_table.DataTable(id='model-comparison-table', data=[], columns=[]), style={'display': 'none'}),
-            html.Div(dash_table.DataTable(id='surrogate-candidates-table', data=[], columns=[]), style={'display': 'none'})
-        ])
+    # This function now always includes placeholders for both tables if the analysis tab is active.
+    # The actual content (buttons and results areas) is built based on analysis_type.
 
-
-    if not raw_data_json:
-        return dbc.Alert("No data uploaded. Please go back to 'Data & Setup' tab.", color="warning")
-    
-    if not column_roles or not isinstance(column_roles, dict) or \
-       not column_roles.get('target_for_analysis') or not column_roles.get('inputs') or not analysis_type:
-        return dbc.Alert("Column roles or analysis type not defined. Please complete setup on 'Data & Setup' tab.", color="warning")
-
-    target_column = column_roles.get('target_for_analysis')
-    
-    try:
-        df = pd.read_json(raw_data_json, orient='split')
-        if target_column not in df.columns:
-            return dbc.Alert(f"Error: Target column '{target_column}' not found in the uploaded data.", color="danger")
-        if not pd.api.types.is_numeric_dtype(df[target_column]):
-            return dbc.Alert(f"Error: Target column '{target_column}' must be numeric for regression analysis.", color="danger")
-        
-        for col in column_roles.get('inputs', []):
-            if col not in df.columns:
-                 return dbc.Alert(f"Error: Input column '{col}' not found in the uploaded data.", color="danger")
-            if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
-                return dbc.Alert(f"Error: Input column '{col}' has an unsupported data type ({df[col].dtype}). Please ensure features are numeric, string/object (for categorical), or boolean.", color="danger")
-    except Exception as e_df_check:
-        return dbc.Alert(f"Error processing data columns: {str(e_df_check)}", color="danger")
-
-
-    exploration_ui = html.Div([
-        html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
-        html.P("This analysis will evaluate multiple machine learning models to identify which input variables (features) have the most significant impact on your selected target output. It helps in understanding key drivers and relationships within your data."),
-        dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
-        dcc.Loading(id="loading-exploration", type="default", children=[html.Div(id="exploration-results-area")]) # Populated by callback
-    ])
-    
-    optimization_ui = html.Div([
-        html.H3(f"Optimization Analysis: Targeting '{target_column}'", className="mb-3 text-success"),
-        html.P(f"This analysis aims to find the optimal combination of input variable settings to either maximize or minimize your selected target output: '{target_column}'. It uses the best model identified from an initial evaluation to predict outcomes over a range of settings."),
-        dbc.Label("Optimization Goal:", className="fw-bold"),
-        dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
-        html.P("Note: For numerical inputs, ranges for optimization are inferred from your data's min/max values. Categorical inputs are tested using their unique values present in the dataset.", className="small text-muted"),
-        dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
-        dcc.Loading(id="loading-optimization", type="default", children=[html.Div(id="optimization-results-area")]) # Populated by callback
-    ])
-
-    # Always render placeholders for the DataTables so their IDs exist in the layout for the modal callback
-    # These will be overwritten by the actual tables when results are generated.
+    # Define placeholders that are always included if this tab is active,
+    # to ensure their IDs are available for other callbacks (like the modal).
+    # They are hidden by default and will be populated by specific analysis callbacks.
     placeholder_expl_table = html.Div(dash_table.DataTable(id='model-comparison-table', data=[], columns=[]), style={'display': 'none'})
     placeholder_opt_table = html.Div(dash_table.DataTable(id='surrogate-candidates-table', data=[], columns=[]), style={'display': 'none'})
-
-
-    if analysis_type == 'exploration':
-        return html.Div([exploration_ui, placeholder_opt_table])
-    elif analysis_type == 'optimization':
-        return html.Div([optimization_ui, placeholder_expl_table])
     
-    return dbc.Alert("Selected analysis type not recognized or setup incomplete.", color="warning")
+    # Placeholder for the actual results area, which will contain the populated table later
+    exploration_results_placeholder = html.Div(id="exploration-results-area")
+    optimization_results_placeholder = html.Div(id="optimization-results-area")
+
+
+    if active_tab != 'tab-analysis': 
+        # If not the analysis tab, return the basic placeholders (already handled this way)
+        return html.Div([
+            html.Div(id='exploration-results-area', style={'display':'none'}), # Keep for consistency if other logic expects it
+            html.Div(id='optimization-results-area', style={'display':'none'}),
+            placeholder_expl_table,
+            placeholder_opt_table
+        ])
+
+    # --- Content for when active_tab == 'tab-analysis' ---
+    analysis_specific_ui_content = html.Div() # This will hold the UI for exploration or optimization
+
+    if not raw_data_json:
+        analysis_specific_ui_content = dbc.Alert("No data uploaded. Please go back to 'Data & Setup' tab.", color="warning")
+    elif not column_roles or not isinstance(column_roles, dict) or \
+         not column_roles.get('target_for_analysis') or not column_roles.get('inputs') or not analysis_type:
+        analysis_specific_ui_content = dbc.Alert("Column roles or analysis type not defined. Please complete setup on 'Data & Setup' tab.", color="warning")
+    else:
+        target_column = column_roles.get('target_for_analysis')
+        try:
+            df = pd.read_json(raw_data_json, orient='split')
+            if target_column not in df.columns:
+                analysis_specific_ui_content = dbc.Alert(f"Error: Target column '{target_column}' not found in the uploaded data.", color="danger")
+            elif not pd.api.types.is_numeric_dtype(df[target_column]):
+                analysis_specific_ui_content = dbc.Alert(f"Error: Target column '{target_column}' must be numeric for regression analysis.", color="danger")
+            else:
+                valid_data = True
+                for col in column_roles.get('inputs', []):
+                    if col not in df.columns:
+                         analysis_specific_ui_content = dbc.Alert(f"Error: Input column '{col}' not found in the uploaded data.", color="danger")
+                         valid_data = False; break
+                    if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+                        analysis_specific_ui_content = dbc.Alert(f"Error: Input column '{col}' has an unsupported data type ({df[col].dtype}). Please ensure features are numeric, string/object (for categorical), or boolean.", color="danger")
+                        valid_data = False; break
+                
+                if valid_data:
+                    if analysis_type == 'exploration':
+                        analysis_specific_ui_content = html.Div([
+                            html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
+                            html.P("This analysis will evaluate multiple machine learning models..."),
+                            dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
+                            dcc.Loading(id="loading-exploration", type="default", children=[exploration_results_placeholder]) 
+                        ])
+                    elif analysis_type == 'optimization':
+                        analysis_specific_ui_content = html.Div([
+                            html.H3(f"Optimization Analysis: Targeting '{target_column}'", className="mb-3 text-success"),
+                            html.P(f"This analysis aims to find the optimal combination..."),
+                            dbc.Label("Optimization Goal:", className="fw-bold"),
+                            dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
+                            html.P("Note: For numerical inputs, ranges for optimization are inferred..."),
+                            dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
+                            dcc.Loading(id="loading-optimization", type="default", children=[optimization_results_placeholder]) 
+                        ])
+                    else:
+                        analysis_specific_ui_content = dbc.Alert("Selected analysis type not recognized or setup incomplete.", color="warning")
+        except Exception as e_df_check:
+            analysis_specific_ui_content = dbc.Alert(f"Error processing data columns: {str(e_df_check)}", color="danger")
+
+    # Always return the main UI content AND both DataTable placeholders (hidden)
+    return html.Div([
+        analysis_specific_ui_content,
+        placeholder_expl_table,
+        placeholder_opt_table
+    ])
 
 
 @app.callback(
@@ -1011,9 +1022,9 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         print(f"Error Exploration AutoML: {e}\n{traceback.format_exc()}")
         error_message = f"Exploration Error: {str(e)}"
         current_step_text_for_store = f"Error: {str(e)}"
-        # Ensure _captured_current_idx is valid for _captured_progress_steps_list
-        if not _captured_progress_steps_list: _captured_progress_steps_list = ["Error occurred"]
+        if not _captured_progress_steps_list: _captured_progress_steps_list = ["Error occurred during Exploration Analysis"] # Ensure steps list is not empty
         _captured_current_idx = min(_captured_current_idx, len(_captured_progress_steps_list) - 1)
+        if _captured_current_idx < 0: _captured_current_idx = 0 # Ensure index is not negative
 
         return dbc.Alert(error_message, color="danger"), \
                None, True, current_step_text_for_store, True, \
@@ -1109,11 +1120,7 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         'residuals_vs_predicted_fig': resid_fig.to_json() if resid_fig and isinstance(resid_fig, go.Figure) else None,
         'shap_beeswarm_plot_src': shap_beeswarm_plot_src 
     }
-    # Set progress-interval to disabled=True as the callback is finishing
     return results_layout, results_data_for_store, False, current_step_text_for_store, True, _captured_progress_steps_list, _captured_current_idx, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
-
-# ... (rest of the callbacks, including run_optimization_analysis_callback, toggle_model_explanation_modal, etc.)
-# Ensure run_optimization_analysis_callback also has robust error handling and correct progress step management.
 
 @app.callback(
     [Output("model-explanation-modal", "is_open"), Output("modal-model-name", "children"), Output("modal-model-desc", "children")],
@@ -1218,8 +1225,10 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         print(f"Error Optimization AutoML: {e}\n{traceback.format_exc()}")
         error_message_opt = f"Optimization Error: {str(e)}"
         current_step_text_for_store_opt = f"Error: {str(e)}"
-        if not _captured_progress_steps_list_opt: _captured_progress_steps_list_opt = ["Error occurred"]
+        if not _captured_progress_steps_list_opt: _captured_progress_steps_list_opt = ["Error occurred during Optimization Analysis"]
         _captured_current_idx_opt = min(_captured_current_idx_opt, len(_captured_progress_steps_list_opt)-1)
+        if _captured_current_idx_opt < 0: _captured_current_idx_opt = 0
+
 
         return dbc.Alert(error_message_opt, color="danger"), \
                None, True, current_step_text_for_store_opt, True, \
