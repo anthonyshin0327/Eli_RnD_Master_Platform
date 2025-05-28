@@ -1,6 +1,21 @@
-dash
-dash-bootstrap-components
-pandas
-autogluon.tabular
-plotly
-openpyxl
+# Dash and Bootstrap Components
+dash==2.16.1
+dash-bootstrap-components==1.6.0
+
+# Core Data Libraries
+pandas>=1.5.3
+numpy>=1.23.5
+
+# Machine Learning
+scikit-learn>=1.3.0
+shap>=0.44.1
+
+# Visualization
+plotly>=5.15.0
+matplotlib>=3.7.1
+
+# Optional (for Excel parsing in uploads)
+openpyxl>=3.1.2
+
+# Prevent issues with urllib3/OpenSSL on Mac (if needed)
+urllib3>=1.26.0

@@ -14,7 +14,7 @@ from itertools import product # Added this import for product
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.svm import SVR
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.tree import DecisionTreeRegressor, export_text, plot_tree # Added plot_tree
+from sklearn.tree import DecisionTreeRegressor, export_text, plot_tree
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
@@ -150,21 +150,20 @@ def create_preprocessing_pipeline(numerical_features, categorical_features, nume
     preprocessor = ColumnTransformer(transformers=transformers, remainder='passthrough')
     return preprocessor
 
-# Initialize MODELS_TO_EVALUATE based on MODEL_EXPLANATIONS for consistency
 MODELS_TO_EVALUATE = []
-default_param_grids_from_user_code = { # From the user's provided code structure
-    'RandomForestRegressor': {'regressor__n_estimators': [50, 100, 200], 'regressor__max_depth': [None, 10, 20]},
-    'GradientBoostingRegressor': {'regressor__n_estimators': [50, 100, 200], 'regressor__learning_rate': [0.01, 0.1, 0.2]},
-    'SVR': {'regressor__kernel': ['rbf', 'linear'], 'regressor__C': [0.1, 1, 10]},
+default_param_grids_from_user_code = { 
+    'RandomForestRegressor': {'regressor__n_estimators': [50, 100], 'regressor__max_depth': [None, 10]}, 
+    'GradientBoostingRegressor': {'regressor__n_estimators': [50, 100], 'regressor__learning_rate': [0.05, 0.1]}, 
+    'SVR': {'regressor__kernel': ['rbf', 'linear'], 'regressor__C': [0.5, 1, 5]}, 
     'LinearRegression': {},
-    'Ridge': {'regressor__alpha': [0.1, 1.0, 10.0]},
-    'Lasso': {'regressor__alpha': [0.1, 1.0, 10.0]},
-    'ElasticNet': {'regressor__alpha': [0.1, 1.0, 10.0], 'regressor__l1_ratio': [0.1, 0.5, 0.9]},
+    'Ridge': {'regressor__alpha': [0.5, 1.0, 5.0]}, 
+    'Lasso': {'regressor__alpha': [0.01, 0.1, 1.0]}, 
+    'ElasticNet': {'regressor__alpha': [0.1, 1.0], 'regressor__l1_ratio': [0.3, 0.7]}, 
     'KNeighborsRegressor': {'regressor__n_neighbors': [3, 5, 7], 'regressor__weights': ['uniform', 'distance']},
-    'DecisionTreeRegressor': {'regressor__max_depth': [None, 5, 10, 15]}
+    'DecisionTreeRegressor': {'regressor__max_depth': [None, 5, 10]} 
 }
 
-for key in MODEL_EXPLANATIONS.keys(): # Iterate through models we have explanations for
+for key in MODEL_EXPLANATIONS.keys(): 
     estimator_instance = None
     if key == "RandomForestRegressor": estimator_instance = RandomForestRegressor(random_state=42, n_jobs=-1)
     elif key == "GradientBoostingRegressor": estimator_instance = GradientBoostingRegressor(random_state=42)
@@ -176,411 +175,333 @@ for key in MODEL_EXPLANATIONS.keys(): # Iterate through models we have explanati
     elif key == "KNeighborsRegressor": estimator_instance = KNeighborsRegressor()
     elif key == "DecisionTreeRegressor": estimator_instance = DecisionTreeRegressor(random_state=42)
 
-    if estimator_instance is not None: # Changed from 'if estimator_instance:'
-        # Use the param grid from the user's provided code if available, otherwise empty
+    if estimator_instance is not None: 
         param_grid_for_model = default_param_grids_from_user_code.get(key, {})
         MODELS_TO_EVALUATE.append({
             'name': key,
             'estimator': estimator_instance,
-            'param_grid': param_grid_for_model # Use the param grid from the user's structure
+            'param_grid': param_grid_for_model 
         })
 
 
 def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges=None):
     print(f"Starting AutoML pipeline for {analysis_type} analysis on target: {target_column}")
+    # Initialize all return values to ensure function signature is met even if errors occur early
     all_model_results = []
-    best_model_info_dict = None # This will store the dictionary of the best model
-    best_r2 = -float('inf') # Initialize with a very low R2 score
-    total_models = len(MODELS_TO_EVALUATE)
-    df_processed = data_df.copy() # Create a copy to avoid modifying the original DataFrame
-    imputer_strategy_for_pipeline = None # Strategy for numerical imputer in pipeline
-
-    # Handle missing values based on the selected strategy
-    if missing_value_strategy == 'drop_rows':
-        cols_for_dropna = feature_columns + [target_column] # Columns to consider for dropping rows
-        df_processed = data_df[cols_for_dropna].dropna().reset_index(drop=True)
-        imputer_strategy_for_pipeline = None # No imputer needed if rows are dropped
-    elif missing_value_strategy in ['mean', 'median', 'most_frequent']:
-        imputer_strategy_for_pipeline = missing_value_strategy # Set imputer strategy for pipeline
-    else:
-        raise ValueError(f"Invalid missing value strategy: {missing_value_strategy}")
-
-    # Define features (X) and target (y)
-    X = df_processed[feature_columns]
-    y = df_processed[target_column]
-
-    # Check if data is empty after preprocessing
-    if X.empty or y.empty:
-        raise ValueError("After handling missing values, the feature set (X) or target (y) is empty.")
-
-    # Identify numerical and categorical features
-    numerical_features = X.select_dtypes(include=np.number).columns.tolist()
-    categorical_features = X.select_dtypes(exclude=np.number).columns.tolist()
-
-    # Split data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-    # Check if training/testing data is empty after split
-    if X_train.empty or X_test.empty:
-        raise ValueError("Training or testing data is empty after split. Dataset might be too small.")
-
-    # Create the base preprocessing pipeline
-    base_preprocessor = create_preprocessing_pipeline(
-        numerical_features, categorical_features,
-        imputer_strategy_for_pipeline if missing_value_strategy != 'drop_rows' else None
-    )
-
-    # Define progress steps for the UI
-    progress_steps = [f"Training {model['name']} ({i+1}/{total_models})" for i, model in enumerate(MODELS_TO_EVALUATE)]
-    progress_steps.append("Calculating SHAP for best model...")
-    if analysis_type == 'optimization':
-        progress_steps.extend(["Generating Surrogate Tree...", "Optimizing (Grid Search)...", "Evaluating Optimal Settings...", "Generating Optimization Results..."])
-    progress_steps.append("Finalizing results...")
-    progress_callback(progress_steps, 0) # Initial progress update
-
-    best_model_pipeline = None # To store the pipeline of the best performing model
-
-    # Iterate through each model configuration to train and evaluate
-    for i, model_config in enumerate(MODELS_TO_EVALUATE):
-        model_name = model_config['name']
-        estimator = model_config['estimator']
-        param_grid = model_config['param_grid']
-        progress_callback(progress_steps, i) # Update progress for current model training
-        
-        # Create the full pipeline with preprocessor and regressor
-        full_pipeline = Pipeline(steps=[('preprocessor', base_preprocessor), ('regressor', estimator)])
-        start_time = time.time()
-
-        # Determine cross-validation folds, handle small datasets
-        cv_folds = min(5, len(X_train) -1 if len(X_train) > 1 else 1) # Ensure at least 1 sample per fold if len(X_train) > 1
-        
-        current_best_pipeline_for_model = None # Stores the best pipeline for the current model (after CV if any)
-        best_params_for_model = {}
-        best_cv_score_for_model = -float('inf')
-
-        if len(X_train) <= cv_folds or cv_folds < 2 : # Not enough samples for meaningful CV
-            print(f"Warning: Dataset too small for {cv_folds}-fold CV for model {model_name}. Fitting without CV.")
-            current_best_pipeline_for_model = full_pipeline
-            current_best_pipeline_for_model.fit(X_train, y_train)
-            # For models without CV, 'best_params' remain empty, CV score is on training data
-            y_train_pred_cv = current_best_pipeline_for_model.predict(X_train)
-            best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
-        elif param_grid: # If hyperparameter grid is defined, perform GridSearchCV
-            grid_search = GridSearchCV(full_pipeline, param_grid, cv=cv_folds, scoring='r2', n_jobs=-1, error_score='raise')
-            grid_search.fit(X_train, y_train)
-            current_best_pipeline_for_model = grid_search.best_estimator_
-            best_params_for_model = grid_search.best_params_
-            best_cv_score_for_model = grid_search.best_score_
-        else: # No hyperparameter grid, fit the pipeline directly
-            current_best_pipeline_for_model = full_pipeline
-            current_best_pipeline_for_model.fit(X_train, y_train)
-            # CV score is on training data if no CV performed
-            y_train_pred_cv = current_best_pipeline_for_model.predict(X_train)
-            best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
-
-        training_time = time.time() - start_time # Calculate training time
-        
-        # Make predictions on the test set and calculate metrics
-        y_pred = current_best_pipeline_for_model.predict(X_test)
-        r_squared = r2_score(y_test, y_pred)
-        mae = mean_absolute_error(y_test, y_pred)
-        mse = mean_squared_error(y_test, y_pred)
-        
-        # Calculate MAPE, handling division by zero
-        y_test_np = np.array(y_test)
-        non_zero_mask = y_test_np != 0 # Avoid division by zero for MAPE
-        mape = np.mean(np.abs((y_test_np[non_zero_mask] - y_pred[non_zero_mask]) / y_test_np[non_zero_mask])) * 100 if np.any(non_zero_mask) else np.nan
-        mape_serializable = None if np.isnan(mape) else mape # Ensure MAPE is JSON serializable
-
-        # Store results for the current model
-        model_result = {
-            "Model Type": model_name, "R-squared": r_squared, "MAE": mae, "RMSE": np.sqrt(mse),
-            "MAPE": mape_serializable, "Best Hyperparameters": best_params_for_model,
-            "Cross-Validation R2": best_cv_score_for_model, "Training Time (s)": training_time,
-            "Pipeline": current_best_pipeline_for_model, # Store the fitted pipeline object
-            "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(model_name, {}).get('hyperparameters', {})
-        }
-        all_model_results.append(model_result)
-
-        # Update the best model if current model performs better
-        if r_squared > best_r2:
-            best_r2 = r_squared
-            best_model_info_dict = model_result # Store the entire dictionary for the best model
-            best_model_pipeline = current_best_pipeline_for_model # Keep track of the best pipeline object
-
-    progress_callback(progress_steps, total_models) # Update progress: SHAP calculation starts
+    best_model_info_dict = {} 
+    importances_df = pd.DataFrame()
+    shap_beeswarm_plot_src = None
+    actual_vs_predicted_fig = go.Figure()
+    residuals_vs_predicted_fig = go.Figure()
     
-    # Initialize SHAP related variables
-    shap_summary_plot = {} # To store SHAP plot figure
-    importances_df = pd.DataFrame() # To store SHAP importances
-    X_train_transformed_df = pd.DataFrame() # Transformed training data for SHAP
+    # Optimization specific return values
+    optimal_settings = {}
+    predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan
+    response_surface_fig = {}
+    surrogate_tree_text = "Not generated."
+    model_info_summary = {}
+    surrogate_tree_plot_src = None
 
-    # Calculate SHAP values if a best model is found and training data is not empty
-    if best_model_pipeline and not X_train.empty:
+    current_progress_steps = [f"Validating Inputs & Data..."] # Start with a validation step
+    current_progress_steps.append(f"Preprocessing Data...")
+    current_progress_steps.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
+    current_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model..."])
+    
+    optimization_specific_steps = []
+    if analysis_type == 'optimization':
+        optimization_specific_steps = ["Generating Surrogate Tree...", "Optimizing (Grid Search over Parameter Space)...", "Evaluating Optimal Settings...", "Generating Optimization Visualizations..."]
+        current_progress_steps.extend(optimization_specific_steps)
+    current_progress_steps.append("Finalizing Results...")
+    
+    progress_callback(current_progress_steps, 0) # Initial call with all defined steps
+
+    try:
+        if data_df is None or data_df.empty: raise ValueError("Input data is empty.")
+        if not target_column or not feature_columns: raise ValueError("Target column or feature columns not specified.")
+        progress_callback(current_progress_steps, 0) # Validating Inputs
+
+        best_r2 = -float('inf') 
+        total_models = len(MODELS_TO_EVALUATE)
+        df_processed = data_df.copy() 
+        imputer_strategy_for_pipeline = None 
+
+        if missing_value_strategy == 'drop_rows':
+            cols_for_dropna = feature_columns + [target_column] 
+            df_processed = data_df[cols_for_dropna].dropna().reset_index(drop=True)
+        elif missing_value_strategy in ['mean', 'median', 'most_frequent']:
+            imputer_strategy_for_pipeline = missing_value_strategy 
+        else:
+            raise ValueError(f"Invalid missing value strategy: {missing_value_strategy}")
+
+        X = df_processed[feature_columns]
+        y = df_processed[target_column]
+
+        if X.empty or y.empty: raise ValueError("Feature set (X) or target (y) is empty after handling missing values.")
+
+        numerical_features = X.select_dtypes(include=np.number).columns.tolist()
+        categorical_features = X.select_dtypes(exclude=np.number).columns.tolist()
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+        if X_train.empty or X_test.empty: raise ValueError("Training or testing data is empty after split.")
+
+        base_preprocessor = create_preprocessing_pipeline(numerical_features, categorical_features, imputer_strategy_for_pipeline if missing_value_strategy != 'drop_rows' else None)
+        
+        progress_callback(current_progress_steps, 1) # "Preprocessing Data..."
+        X_train_processed = base_preprocessor.fit_transform(X_train)
+        X_test_processed = base_preprocessor.transform(X_test)
+        
         try:
-            # Transform training data using the preprocessor from the best pipeline
-            X_train_transformed = best_model_pipeline.named_steps['preprocessor'].transform(X_train)
-        except Exception as e_transform: # Handle cases where transform might fail (e.g., preprocessor not fitted)
-            print(f"Error transforming X_train with preprocessor: {e_transform}. Trying to fit preprocessor first.")
-            try:
-                best_model_pipeline.named_steps['preprocessor'].fit(X_train, y_train) # Fit if not already
-                X_train_transformed = best_model_pipeline.named_steps['preprocessor'].transform(X_train)
-            except Exception as e_fit_transform:
-                print(f"Critical error: Could not prepare X_train_transformed for SHAP: {e_fit_transform}")
-                X_train_transformed = None # Ensure it's None if transformation fails
+            feature_names_out = base_preprocessor.get_feature_names_out()
+        except AttributeError: 
+            ohe_feature_names = []
+            if 'cat' in base_preprocessor.named_transformers_:
+                cat_pipeline = base_preprocessor.named_transformers_['cat']
+                if 'onehot' in cat_pipeline.named_steps and categorical_features:
+                    try: ohe_feature_names = cat_pipeline.named_steps['onehot'].get_feature_names_out(categorical_features).tolist()
+                    except: ohe_feature_names = [f"cat_feat_{i}" for i in range(len(categorical_features))] 
+            feature_names_out = numerical_features + ohe_feature_names
+            if not feature_names_out or len(feature_names_out) != X_train_processed.shape[1]:
+                feature_names_out = [f"feature_{j}" for j in range(X_train_processed.shape[1])]
+        
+        X_train_processed_df = pd.DataFrame(X_train_processed, columns=feature_names_out)
+        X_test_processed_df = pd.DataFrame(X_test_processed, columns=feature_names_out)
+        
+        best_model_pipeline_obj = None # Use a different name to avoid conflict with a potential function name
 
-        if X_train_transformed is not None:
-            feature_names_out = []
-            try: # Get feature names after transformation
-                feature_names_out = best_model_pipeline.named_steps['preprocessor'].get_feature_names_out()
-            except AttributeError: # Fallback if get_feature_names_out is not available (older scikit-learn or custom transformer)
-                ohe_feature_names = []
-                if 'cat' in best_model_pipeline.named_steps['preprocessor'].named_transformers_:
-                    cat_pipeline = best_model_pipeline.named_steps['preprocessor'].named_transformers_['cat']
-                    if 'onehot' in cat_pipeline.named_steps and categorical_features:
-                        try:
-                            ohe_feature_names = cat_pipeline.named_steps['onehot'].get_feature_names_out(categorical_features).tolist()
-                        except: # Generic fallback for one-hot encoded names
-                            ohe_feature_names = [f"cat_feature_{i}" for i in range(len(categorical_features))] # Simplified naming
-                feature_names_out = numerical_features + ohe_feature_names
-                # Ensure the number of feature names matches the number of columns in transformed data
-                if not feature_names_out or len(feature_names_out) != X_train_transformed.shape[1]:
-                    feature_names_out = [f"feature_{j}" for j in range(X_train_transformed.shape[1])]
+        for i, model_config in enumerate(MODELS_TO_EVALUATE):
+            model_name = model_config['name']
+            estimator = model_config['estimator']
+            param_grid_for_estimator = {k.replace('regressor__', ''): v for k, v in model_config['param_grid'].items()}
             
-            X_train_transformed_df = pd.DataFrame(X_train_transformed, columns=feature_names_out)
-
-            if not X_train_transformed_df.empty:
-                n_shap_samples = min(100, X_train_transformed_df.shape[0]) # Use a subset for SHAP if dataset is large
-                if n_shap_samples > 0:
-                    X_shap = X_train_transformed_df.sample(n=n_shap_samples, random_state=42)
-                    regressor_step = best_model_pipeline.named_steps['regressor']
-                    explainer = None
-                    try: # Create SHAP explainer based on model type
-                        if isinstance(regressor_step, (RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)):
-                            explainer = shap.TreeExplainer(regressor_step, X_shap) # TreeExplainer for tree-based models
-                        else: # KernelExplainer for other models
-                            n_background_samples = min(50, X_train_transformed_df.shape[0]) # Background data for KernelExplainer
-                            if n_background_samples > 0:
-                                background_data = shap.sample(X_train_transformed_df, n_background_samples)
-                                explainer = shap.KernelExplainer(regressor_step.predict, background_data)
-                    except Exception as shap_e:
-                        print(f"SHAP Explainer creation failed: {shap_e}")
-
-                    if explainer:
-                        try: # Calculate SHAP values
-                            shap_values = explainer.shap_values(X_shap)
-                            # Handle different SHAP value structures (e.g., list for multi-output)
-                            shap_values_abs_mean = np.abs(shap_values[0] if isinstance(shap_values, list) else shap_values).mean(axis=0)
-                            importances_df = pd.DataFrame({'feature': X_shap.columns, 'importance': shap_values_abs_mean}).sort_values(by='importance', ascending=False)
-                            # Create SHAP summary plot figure
-                            shap_summary_plot = {
-                                'data': [go.Bar(x=importances_df['feature'], y=importances_df['importance'], marker_color='#17A2B8' if analysis_type == 'exploration' else '#28a745')],
-                                'layout': {'title': f'Feature Importance (Mean SHAP) for {best_model_info_dict["Model Type"]}', 'xaxis': {'tickangle': 45}, 'yaxis': {'title': 'Mean Absolute SHAP Value'}, 'margin': {'b': 150, 't':50, 'l':50, 'r':50}, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)', 'font': {'color': '#495057'}}
-                            }
-                        except Exception as e_shap_values:
-                            print(f"Error computing SHAP values: {e_shap_values}")
-                            importances_df = pd.DataFrame() # Empty dataframe if error
-                            shap_summary_plot = {} # Empty plot if error
-
-    # Return results based on analysis type
-    if analysis_type == 'exploration':
-        progress_callback(progress_steps, total_models + 1) # Update progress: Finalizing
-        return all_model_results, best_model_info_dict, importances_df, shap_summary_plot, progress_steps
-
-    elif analysis_type == 'optimization':
-        progress_callback(progress_steps, total_models + 1) # SHAP done, starting optimization specific steps
-        surrogate_tree_text = "Not applicable or error in generation." # Default text for surrogate tree
-        surrogate_tree_plot_src = None # For base64 encoded image of the tree
-
-        # Generate surrogate decision tree if data is available
-        if not X_train_transformed_df.empty and X_train_transformed_df.shape[0] > 0 and best_model_pipeline:
-            y_hat_best_model = best_model_pipeline.predict(X_train) # Predictions from the best model on training data
-            interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42) # Simple tree for interpretability
-            interpretable_tree.fit(X_train_transformed_df, y_hat_best_model)
-            tree_feature_names = X_train_transformed_df.columns.tolist()
-            surrogate_tree_text = export_text(interpretable_tree, feature_names=tree_feature_names)
-            try: # Plot the surrogate tree
-                fig_tree, ax_tree = plt.subplots(figsize=(min(25, 4*len(tree_feature_names) if len(tree_feature_names)>0 else 10),12), dpi=100) # Dynamic width, increased DPI
-                plot_tree(interpretable_tree, feature_names=tree_feature_names, filled=True, rounded=True, fontsize=min(10, 120/len(tree_feature_names) if len(tree_feature_names)>0 else 10), ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
-                img_buffer = io.BytesIO()
-                fig_tree.savefig(img_buffer, format="png", bbox_inches="tight")
-                plt.close(fig_tree) # Close plot to free memory
-                img_buffer.seek(0)
-                img_base64 = base64.b64encode(img_buffer.read()).decode()
-                surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
-            except Exception as e_tree_plot:
-                print(f"Error generating surrogate tree plot: {e_tree_plot}")
-                surrogate_tree_plot_src = None # Ensure it's None if plotting fails
-        
-        progress_callback(progress_steps, total_models + 2) # Surrogate tree done
-
-        # Initialize optimization variables
-        optimal_settings = {col: "N/A" for col in feature_columns}
-        predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan # Use NaN for numerics
-        response_surface_fig = {} # For response surface plot
-
-        # Define grid points for optimization search
-        # Use a smaller number of points (e.g., 5) for numerical features for speed in demo
-        # For categorical, use all unique values
-        grid_points_num = {col: np.linspace(feature_ranges[col]['min'], feature_ranges[col]['max'], 5) for col in numerical_features if col in feature_ranges and feature_ranges[col]['min'] != feature_ranges[col]['max']}
-        grid_points_cat = {col: X[col].unique().tolist() for col in categorical_features}
-
-        iterables_for_product_details = [] # List of (feature_name, values_to_iterate)
-        for col in feature_columns: # Iterate over original feature columns to maintain order and completeness
-            if col in grid_points_num:
-                iterables_for_product_details.append((col, grid_points_num[col]))
-            elif col in grid_points_cat:
-                iterables_for_product_details.append((col, grid_points_cat[col]))
-            elif col in numerical_features: # Numerical feature not in feature_ranges (e.g. min=max) or not varied
-                 iterables_for_product_details.append((col, [X[col].mean()])) # Use mean if not varied
-            # If a categorical feature is not in grid_points_cat (should not happen if X is not empty), it would be missed.
-            # This logic assumes feature_columns are all covered by numerical_features or categorical_features.
-
-        current_iterables_values = [item[1] for item in iterables_for_product_details]
-        current_feature_names_ordered = [item[0] for item in iterables_for_product_details]
-        all_combinations_list = [] # List of dictionaries
-
-        if not current_iterables_values and feature_columns: # Case: No features to iterate over (e.g., all fixed)
-            # Create a single row with mean for numerical and mode for categorical
-            fixed_row_dict = {}
-            for col in feature_columns:
-                if col in numerical_features:
-                    fixed_row_dict[col] = X[col].mean()
-                elif col in categorical_features and not X[col].mode().empty:
-                    fixed_row_dict[col] = X[col].mode()[0]
-                else:
-                    fixed_row_dict[col] = None # Fallback for unhandled cases
-            all_combinations_list.append(fixed_row_dict)
-        elif current_iterables_values:
-            for combo_values in product(*current_iterables_values):
-                current_combo_dict = dict(zip(current_feature_names_ordered, combo_values))
-                # Ensure all original feature_columns are present in the combo_dict
-                # For features not part of the iteration (e.g., if they had only one value or were fixed)
-                for original_col in feature_columns:
-                    if original_col not in current_combo_dict:
-                        if original_col in numerical_features:
-                            current_combo_dict[original_col] = X[original_col].mean() # Or a fixed value if appropriate
-                        elif original_col in categorical_features and not X[original_col].mode().empty:
-                            current_combo_dict[original_col] = X[original_col].mode()[0]
-                        else: # Fallback if somehow a column is missed
-                             current_combo_dict[original_col] = None
-                all_combinations_list.append(current_combo_dict)
-        
-        if not all_combinations_list:
-            # This case should ideally not be reached if feature_columns is not empty.
-            # If it is, it implies an issue with generating combinations.
-            # For safety, create a default row if X is not empty.
-            if not X.empty:
-                default_row = {col: X[col].mean() if col in numerical_features else (X[col].mode()[0] if col in categorical_features and not X[col].mode().empty else None) for col in feature_columns}
-                all_combinations_list.append(default_row)
-            else: # Should have been caught by earlier checks on X.empty
-                 raise ValueError("No combinations for optimization grid search and X is empty.")
-
-        optimization_df = pd.DataFrame(all_combinations_list, columns=feature_columns) # Ensure column order
-        
-        if not optimization_df.empty:
-            optimization_predictions = best_model_pipeline.predict(optimization_df[feature_columns])
-            optimal_idx = np.argmax(optimization_predictions) if optimization_goal == 'maximize' else np.argmin(optimization_predictions)
-            optimal_settings = optimization_df.iloc[optimal_idx].to_dict()
-            predicted_target = optimization_predictions[optimal_idx]
-
-            # Estimate confidence interval using standard deviation of predictions on the test set
-            if not X_test.empty:
-                test_predictions_for_std = best_model_pipeline.predict(X_test[feature_columns])
-                prediction_std = np.std(test_predictions_for_std)
-                predicted_target_lower = predicted_target - 1.96 * prediction_std
-                predicted_target_upper = predicted_target + 1.96 * prediction_std
-            else: # Fallback if X_test is empty (should not happen with test_size > 0)
-                predicted_target_lower, predicted_target_upper = predicted_target, predicted_target
-        else: # optimization_df is empty, set defaults
-            optimal_settings = {col: "N/A" for col in feature_columns}
-            predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan
-
-
-        progress_callback(progress_steps, total_models + 3) # Optimization grid search done
-
-        # Generate response surface plot if applicable
-        varied_numerical_features_for_plot = [col for col in numerical_features if col in feature_columns and col in grid_points_num and len(grid_points_num[col]) > 1]
-        plot_points_surface = 15 # Number of points for each axis in surface plot
-
-        if len(varied_numerical_features_for_plot) >= 2:
-            x_feat, y_feat = varied_numerical_features_for_plot[0], varied_numerical_features_for_plot[1]
-            x_plot_range = np.linspace(feature_ranges[x_feat]['min'], feature_ranges[x_feat]['max'], plot_points_surface)
-            y_plot_range = np.linspace(feature_ranges[y_feat]['min'], feature_ranges[y_feat]['max'], plot_points_surface)
-            X_grid, Y_grid = np.meshgrid(x_plot_range, y_plot_range)
-
-            plot_df_list_surface = []
-            # Create dataframe for predictions across the grid
-            for i_idx in range(X_grid.shape[0]):
-                for j_idx in range(X_grid.shape[1]):
-                    row = {x_feat: X_grid[i_idx, j_idx], y_feat: Y_grid[i_idx, j_idx]}
-                    # Fill other features with optimal values or means/modes
-                    for col_fill in feature_columns:
-                        if col_fill not in row:
-                            row[col_fill] = optimal_settings.get(col_fill, X[col_fill].mean() if col_fill in numerical_features else (X[col_fill].mode()[0] if col_fill in categorical_features and not X[col_fill].mode().empty else None))
-                    plot_df_list_surface.append(row)
+            progress_callback(current_progress_steps, i + 2) # +2 for "Validating" and "Preprocessing"
             
-            plot_df_surface = pd.DataFrame(plot_df_list_surface, columns=feature_columns)
-            if not plot_df_surface.empty:
-                Z_grid_flat = best_model_pipeline.predict(plot_df_surface[feature_columns])
-                Z_grid = Z_grid_flat.reshape(X_grid.shape)
-                response_surface_fig = {
-                    'data': [go.Contour(x=x_plot_range, y=y_plot_range, z=Z_grid, colorscale='Viridis', contours_coloring='heatmap', colorbar_title=target_column)],
-                    'layout': {'title': f'Predicted Response Surface for {target_column}', 'xaxis': {'title': x_feat}, 'yaxis': {'title': y_feat}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}
-                }
-        elif len(varied_numerical_features_for_plot) == 1: # 1D plot if only one numerical feature varied
-            x_feat = varied_numerical_features_for_plot[0]
-            x_plot_range = np.linspace(feature_ranges[x_feat]['min'], feature_ranges[x_feat]['max'], plot_points_surface * 2)
-            plot_df_rows_1d = []
-            for val_x in x_plot_range:
-                row = {x_feat: val_x}
-                for col_fill in feature_columns:
-                    if col_fill not in row:
-                        row[col_fill] = optimal_settings.get(col_fill, X[col_fill].mean() if col_fill in numerical_features else (X[col_fill].mode()[0] if col_fill in categorical_features and not X[col_fill].mode().empty else None))
-                plot_df_rows_1d.append(row)
-            plot_df_1d = pd.DataFrame(plot_df_rows_1d, columns=feature_columns)
-            if not plot_df_1d.empty:
-                y_plot_vals = best_model_pipeline.predict(plot_df_1d[feature_columns])
-                response_surface_fig = {
-                    'data': [go.Scatter(x=x_plot_range, y=y_plot_vals, mode='lines', line_color='#28a745')],
-                    'layout': {'title': f'Predicted Response: {target_column} vs {x_feat}', 'xaxis': {'title': x_feat}, 'yaxis': {'title': target_column}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}
-                }
-        
-        progress_callback(progress_steps, total_models + 4) # Evaluating optimal settings done
+            start_time = time.time()
+            current_best_estimator_for_model = None; best_params_for_model = {}; best_cv_score_for_model = -float('inf')
+            cv_folds = min(5, len(X_train_processed_df) -1 if len(X_train_processed_df) > 1 else 1)
 
-        # Prepare summary of the model used for optimization (the best model from the initial phase)
-        model_info_summary = {}
-        if best_model_info_dict: # best_model_info_dict refers to the best model chosen before optimization specific steps
-            regressor_params = best_model_info_dict['Pipeline'].named_steps['regressor'].get_params()
-            # Filter for relevant hyperparameters to display
-            hyperparams_to_show = {k_orig: v for k_orig, v in regressor_params.items() if k_orig.split('__')[-1] in MODEL_EXPLANATIONS.get(best_model_info_dict['Model Type'], {}).get('hyperparameters', {})}
-            if not hyperparams_to_show and best_model_info_dict.get("Best Hyperparameters"): # Fallback to stored best params if direct get_params is too verbose
-                 hyperparams_to_show = best_model_info_dict.get("Best Hyperparameters", {})
+            if len(X_train_processed_df) <= cv_folds or cv_folds < 2 :
+                current_best_estimator_for_model = estimator
+                current_best_estimator_for_model.fit(X_train_processed_df, y_train)
+                y_train_pred_cv = current_best_estimator_for_model.predict(X_train_processed_df)
+                best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
+            elif param_grid_for_estimator:
+                grid_search = GridSearchCV(estimator, param_grid_for_estimator, cv=cv_folds, scoring='r2', n_jobs=-1, error_score='raise')
+                grid_search.fit(X_train_processed_df, y_train)
+                current_best_estimator_for_model = grid_search.best_estimator_
+                best_params_for_model = grid_search.best_params_
+                best_cv_score_for_model = grid_search.best_score_
+            else:
+                current_best_estimator_for_model = estimator
+                current_best_estimator_for_model.fit(X_train_processed_df, y_train)
+                y_train_pred_cv = current_best_estimator_for_model.predict(X_train_processed_df)
+                best_cv_score_for_model = r2_score(y_train, y_train_pred_cv)
+            
+            training_time = time.time() - start_time
+            y_pred_on_test = current_best_estimator_for_model.predict(X_test_processed_df)
+            r_squared = r2_score(y_test, y_pred_on_test)
+            mae = mean_absolute_error(y_test, y_pred_on_test)
+            mse = mean_squared_error(y_test, y_pred_on_test)
+            y_test_np = np.array(y_test)
+            non_zero_mask = y_test_np != 0
+            mape = np.mean(np.abs((y_test_np[non_zero_mask] - y_pred_on_test[non_zero_mask]) / y_test_np[non_zero_mask])) * 100 if np.any(non_zero_mask) else np.nan
+            mape_serializable = None if np.isnan(mape) else mape
+            final_pipeline_for_model = Pipeline(steps=[('preprocessor', base_preprocessor), ('regressor', current_best_estimator_for_model)])
 
-
-            model_info_summary = {
-                "Model Type": best_model_info_dict.get('Model Type', "N/A"),
-                "Hyperparameters": hyperparams_to_show,
-                "Training Data Shape": X_train.shape if not X_train.empty else "N/A",
-                "Test Data Shape": X_test.shape if not X_test.empty else "N/A",
-                "Features Used": feature_columns, "Target Column": target_column,
-                "Missing Value Strategy": missing_value_strategy,
-                "Optimization Goal": optimization_goal,
-                "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(best_model_info_dict.get('Model Type', ''), {}).get('hyperparameters', {})
+            model_result = {
+                "Model Type": model_name, "R-squared": r_squared, "MAE": mae, "RMSE": np.sqrt(mse),
+                "MAPE": mape_serializable, "Best Hyperparameters": best_params_for_model,
+                "Cross-Validation R2": best_cv_score_for_model, "Training Time (s)": training_time,
+                "Pipeline": final_pipeline_for_model, 
+                "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(model_name, {}).get('hyperparameters', {})
             }
+            all_model_results.append(model_result)
+
+            if r_squared > best_r2:
+                best_r2 = r_squared
+                best_model_info_dict = model_result
+                best_model_pipeline_obj = final_pipeline_for_model
         
-        progress_callback(progress_steps, total_models + 5) # Finalizing optimization results
-        return all_model_results, best_model_info_dict, importances_df, shap_summary_plot, progress_steps, \
-               optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
-               response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src
+        current_progress_idx_offset = 2 + total_models # Validating + Preprocessing + All models
+        progress_callback(current_progress_steps, current_progress_idx_offset) # "Evaluating Best Model..."
+        
+        if best_model_pipeline_obj and not X_train_processed_df.empty and best_model_info_dict:
+            best_regressor = best_model_pipeline_obj.named_steps['regressor']
+            y_pred_best_model_test = best_regressor.predict(X_test_processed_df)
+            
+            try:
+                actual_vs_predicted_fig = px.scatter(x=y_test, y=y_pred_best_model_test, labels={'x': 'Actual Values', 'y': 'Predicted Values'}, title=f'Actual vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                actual_vs_predicted_fig.add_trace(go.Scatter(x=[min(y_test.min(), y_pred_best_model_test.min()), max(y_test.max(), y_pred_best_model_test.max())], y=[min(y_test.min(), y_pred_best_model_test.min()), max(y_test.max(), y_pred_best_model_test.max())], mode='lines', name='Ideal Fit', line=dict(dash='dash', color='grey')))
+                actual_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
+            except Exception as e_avp: print(f"Error Actual vs Predicted plot: {e_avp}")
+
+            try:
+                residuals = y_test - y_pred_best_model_test
+                residuals_vs_predicted_fig = px.scatter(x=y_pred_best_model_test, y=residuals, labels={'x': 'Predicted Values', 'y': 'Residuals'}, title=f'Residuals vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                residuals_vs_predicted_fig.add_hline(y=0, line_dash="dash", line_color="grey")
+                residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400)
+            except Exception as e_resid: print(f"Error Residuals plot: {e_resid}")
+
+            progress_callback(current_progress_steps, current_progress_idx_offset + 1) # "Calculating SHAP..."
+            
+            shap_values_for_plot = None; X_shap_for_plot = None
+            n_shap_samples = min(100, X_train_processed_df.shape[0])
+            if n_shap_samples > 0:
+                X_shap_for_plot = shap.sample(X_train_processed_df, n_shap_samples, random_state=42) 
+                explainer = None
+                try:
+                    if isinstance(best_regressor, (RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)): explainer = shap.TreeExplainer(best_regressor, X_shap_for_plot)
+                    else: explainer = shap.KernelExplainer(best_regressor.predict, X_shap_for_plot) 
+                    if explainer: shap_values_for_plot = explainer.shap_values(X_shap_for_plot) 
+                except Exception as shap_e: print(f"SHAP calculation failed: {shap_e}")
+            
+            if shap_values_for_plot is not None and X_shap_for_plot is not None and not X_shap_for_plot.empty:
+                try:
+                    plt.figure() 
+                    shap.summary_plot(shap_values_for_plot, X_shap_for_plot, plot_type="dot", show=False, feature_names=X_train_processed_df.columns.tolist())
+                    fig_shap = plt.gcf(); fig_shap.set_size_inches(10, max(6, len(X_train_processed_df.columns) * 0.3)) 
+                    plt.title(f'SHAP Feature Importance ({best_model_info_dict.get("Model Type", "N/A")})', fontsize=12); plt.xlabel("SHAP value (impact on model output)", fontsize=10); plt.tight_layout()
+                    img_buffer_shap = io.BytesIO(); fig_shap.savefig(img_buffer_shap, format="png", bbox_inches="tight"); plt.close(fig_shap)
+                    img_buffer_shap.seek(0); img_base64_shap = base64.b64encode(img_buffer_shap.read()).decode()
+                    shap_beeswarm_plot_src = f"data:image/png;base64,{img_base64_shap}"
+                except Exception as e_shap_plot: print(f"Error SHAP beeswarm plot: {e_shap_plot}")
+                try:
+                    mean_abs_shap = np.abs(shap_values_for_plot).mean(axis=0)
+                    importances_df = pd.DataFrame({'feature': X_shap_for_plot.columns, 'importance': mean_abs_shap}).sort_values(by='importance', ascending=False)
+                except Exception as e_imp_df: print(f"Error SHAP importances_df: {e_imp_df}")
+        
+        current_progress_idx_offset += 2 # For "Evaluating..." and "Calculating SHAP..."
+
+        if analysis_type == 'exploration':
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Finalizing..."
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig
+
+        elif analysis_type == 'optimization':
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Generating Surrogate Tree..."
+            if not X_train_processed_df.empty and best_model_pipeline_obj:
+                best_regressor_for_surrogate = best_model_pipeline_obj.named_steps['regressor']
+                y_hat_train_surrogate = best_regressor_for_surrogate.predict(X_train_processed_df)
+                interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42)
+                try:
+                    interpretable_tree.fit(X_train_processed_df, y_hat_train_surrogate) 
+                    surrogate_tree_text = export_text(interpretable_tree, feature_names=X_train_processed_df.columns.tolist())
+                    fig_tree, ax_tree = plt.subplots(figsize=(min(20, 3*len(X_train_processed_df.columns)),10), dpi=100)
+                    plot_tree(interpretable_tree, feature_names=X_train_processed_df.columns.tolist(), filled=True, rounded=True, fontsize=min(9, 100/len(X_train_processed_df.columns) if len(X_train_processed_df.columns)>0 else 9), ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
+                    plt.title("Surrogate Decision Tree", fontsize=12); img_buffer = io.BytesIO(); fig_tree.savefig(img_buffer, format="png", bbox_inches="tight"); plt.close(fig_tree)
+                    img_buffer.seek(0); img_base64 = base64.b64encode(img_buffer.read()).decode(); surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
+                except Exception as e_tree_plot: print(f"Error surrogate tree plot: {e_tree_plot}")
+            
+            current_progress_idx_offset +=1 
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Optimizing (Grid Search)..."
+            optimal_settings = {col: "N/A" for col in feature_columns} 
+
+            grid_points_num_orig = {col: np.linspace(feature_ranges[col]['min'], feature_ranges[col]['max'], 5) for col in numerical_features if col in feature_ranges and feature_ranges[col]['min'] != feature_ranges[col]['max']}
+            grid_points_cat_orig = {col: data_df[col].unique().tolist() for col in categorical_features}
+            iterables_for_product_orig = []
+            for col in feature_columns:
+                if col in grid_points_num_orig: iterables_for_product_orig.append((col, grid_points_num_orig[col]))
+                elif col in grid_points_cat_orig: iterables_for_product_orig.append((col, grid_points_cat_orig[col]))
+                elif col in numerical_features: iterables_for_product_orig.append((col, [data_df[col].mean()]))
+                elif col in categorical_features and not data_df[col].mode().empty: iterables_for_product_orig.append((col, [data_df[col].mode()[0]]))
+                else: iterables_for_product_orig.append((col, [None]))
+            current_iterables_values_orig = [item[1] for item in iterables_for_product_orig]; current_feature_names_ordered_orig = [item[0] for item in iterables_for_product_orig]
+            all_combinations_list_orig = [dict(zip(current_feature_names_ordered_orig, combo_values_orig)) for combo_values_orig in product(*current_iterables_values_orig)]
+            
+            if not all_combinations_list_orig and not data_df.empty:
+                 default_row = {col: data_df[col].mean() if col in numerical_features else (data_df[col].mode()[0] if col in categorical_features and not data_df[col].mode().empty else None) for col in feature_columns}
+                 all_combinations_list_orig.append(default_row)
+
+            if all_combinations_list_orig:
+                optimization_df_orig_features = pd.DataFrame(all_combinations_list_orig, columns=feature_columns)
+                try:
+                    optimization_df_processed = base_preprocessor.transform(optimization_df_orig_features)
+                    optimization_df_processed = pd.DataFrame(optimization_df_processed, columns=feature_names_out)
+                    best_regressor_for_opt = best_model_pipeline_obj.named_steps['regressor']
+                    optimization_predictions = best_regressor_for_opt.predict(optimization_df_processed)
+                    optimal_idx = np.argmax(optimization_predictions) if optimization_goal == 'maximize' else np.argmin(optimization_predictions)
+                    optimal_settings = optimization_df_orig_features.iloc[optimal_idx].to_dict()
+                    predicted_target = optimization_predictions[optimal_idx]
+                    if not X_test_processed_df.empty:
+                        test_predictions_for_std = best_regressor_for_opt.predict(X_test_processed_df)
+                        prediction_std = np.std(test_predictions_for_std)
+                        predicted_target_lower = predicted_target - 1.96 * prediction_std; predicted_target_upper = predicted_target + 1.96 * prediction_std
+                    else: predicted_target_lower, predicted_target_upper = predicted_target, predicted_target
+                except Exception as e_opt_pred: print(f"Error optimization prediction: {e_opt_pred}")
+
+            current_progress_idx_offset +=1
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Evaluating Optimal Settings..."
+            
+            try:
+                varied_numerical_features_for_plot_orig = [col for col in numerical_features if col in feature_columns and col in grid_points_num_orig and len(grid_points_num_orig[col]) > 1]
+                plot_points_surface = 15
+                if len(varied_numerical_features_for_plot_orig) >= 2:
+                    x_f, y_f = varied_numerical_features_for_plot_orig[0], varied_numerical_features_for_plot_orig[1]
+                    x_r, y_r = np.linspace(feature_ranges[x_f]['min'], feature_ranges[x_f]['max'], plot_points_surface), np.linspace(feature_ranges[y_f]['min'], feature_ranges[y_f]['max'], plot_points_surface)
+                    X_g, Y_g = np.meshgrid(x_r, y_r); p_list = []
+                    for i0 in range(X_g.shape[0]):
+                        for j0 in range(X_g.shape[1]):
+                            r0 = {x_f: X_g[i0, j0], y_f: Y_g[i0, j0]}
+                            for cf in feature_columns:
+                                if cf not in r0: r0[cf] = optimal_settings.get(cf, data_df[cf].mean() if cf in numerical_features else (data_df[cf].mode()[0] if cf in categorical_features and not data_df[cf].mode().empty else None))
+                            p_list.append(r0)
+                    p_df_s = pd.DataFrame(p_list, columns=feature_columns)
+                    if not p_df_s.empty:
+                        p_df_s_proc = base_preprocessor.transform(p_df_s); p_df_s_proc = pd.DataFrame(p_df_s_proc, columns=feature_names_out)
+                        Z_g_flat = best_model_pipeline_obj.named_steps['regressor'].predict(p_df_s_proc); Z_g = Z_g_flat.reshape(X_g.shape)
+                        response_surface_fig = {'data': [go.Contour(x=x_r, y=y_r, z=Z_g, colorscale='Viridis', contours_coloring='heatmap', colorbar_title=target_column)], 'layout': {'title': f'Response Surface for {target_column}', 'xaxis': {'title': x_f}, 'yaxis': {'title': y_f}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}}
+                elif len(varied_numerical_features_for_plot_orig) == 1:
+                    x_f1 = varied_numerical_features_for_plot_orig[0]; x_r1 = np.linspace(feature_ranges[x_f1]['min'], feature_ranges[x_f1]['max'], plot_points_surface * 2); p_r1 = []
+                    for vx1 in x_r1:
+                        r1 = {x_f1: vx1}
+                        for cf in feature_columns:
+                            if cf not in r1: r1[cf] = optimal_settings.get(cf, data_df[cf].mean() if cf in numerical_features else (data_df[cf].mode()[0] if cf in categorical_features and not data_df[cf].mode().empty else None))
+                        p_r1.append(r1)
+                    p_df1 = pd.DataFrame(p_r1, columns=feature_columns)
+                    if not p_df1.empty:
+                        p_df1_proc = base_preprocessor.transform(p_df1); p_df1_proc = pd.DataFrame(p_df1_proc, columns=feature_names_out)
+                        y_pv = best_model_pipeline_obj.named_steps['regressor'].predict(p_df1_proc)
+                        response_surface_fig = {'data': [go.Scatter(x=x_r1, y=y_pv, mode='lines', line_color='#28a745')], 'layout': {'title': f'Response: {target_column} vs {x_f1}', 'xaxis': {'title': x_f1}, 'yaxis': {'title': target_column}, 'height': 500, 'paper_bgcolor': 'rgba(0,0,0,0)', 'plot_bgcolor': 'rgba(0,0,0,0)'}}
+            except Exception as e_resp_surf: print(f"Error response surface plot: {e_resp_surf}")
+
+            current_progress_idx_offset +=1
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Generating Optimization Visualizations..."
+
+            model_info_summary = {}
+            if best_model_info_dict: 
+                regressor_params = best_model_info_dict['Pipeline'].named_steps['regressor'].get_params()
+                hyperparams_to_show = {k_orig: v for k_orig, v in regressor_params.items() if k_orig.split('__')[-1] in MODEL_EXPLANATIONS.get(best_model_info_dict['Model Type'], {}).get('hyperparameters', {})}
+                if not hyperparams_to_show and best_model_info_dict.get("Best Hyperparameters"): hyperparams_to_show = best_model_info_dict.get("Best Hyperparameters", {})
+                model_info_summary = {
+                    "Model Type": best_model_info_dict.get('Model Type', "N/A"), "Hyperparameters": hyperparams_to_show,
+                    "Training Data Shape (Original)": X_train.shape if not X_train.empty else "N/A", "Test Data Shape (Original)": X_test.shape if not X_test.empty else "N/A",
+                    "Features Used (Original)": feature_columns, "Target Column": target_column, "Missing Value Strategy": missing_value_strategy, 
+                    "Optimization Goal": optimization_goal, "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(best_model_info_dict.get('Model Type', ''), {}).get('hyperparameters', {})}
+            
+            current_progress_idx_offset +=1
+            progress_callback(current_progress_steps, current_progress_idx_offset) # "Finalizing Results..."
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, \
+                   optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
+                   response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
+                   actual_vs_predicted_fig, residuals_vs_predicted_fig
+        
+    except Exception as main_pipeline_error:
+        print(f"CRITICAL ERROR in AutoML pipeline: {main_pipeline_error}\n{traceback.format_exc()}")
+        progress_callback(current_progress_steps, len(current_progress_steps) -1) # Mark as finished, possibly error state
+        # Ensure all expected return values are provided, even if they are defaults/placeholders
+        if analysis_type == 'exploration':
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig
+        elif analysis_type == 'optimization':
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, \
+                   optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
+                   response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
+                   actual_vs_predicted_fig, residuals_vs_predicted_fig
+        else: # Should not happen
+            raise main_pipeline_error
 
 
 def run_exploration_automl(data_df, target_column, feature_columns, missing_value_strategy, progress_callback):
-    # Wrapper for exploration analysis
     return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, 'exploration')
 
 def run_optimization_automl(data_df, target_column, feature_columns, optimization_goal, feature_ranges, missing_value_strategy, progress_callback):
-    # Wrapper for optimization analysis
     return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy,
                                  progress_callback, 'optimization',
                                  optimization_goal=optimization_goal, feature_ranges=feature_ranges)
@@ -588,116 +509,135 @@ def run_optimization_automl(data_df, target_column, feature_columns, optimizatio
 
 def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition=""):
     prompt_data = {}
-    best_model_name = "N/A" # Default
+    best_model_name = "N/A" 
 
     if analysis_type == "Exploration":
-        # For exploration, best_model_info contains the details of the best overall model
         best_model_name = results_data.get('best_model_info', {}).get('Model Type', 'N/A')
         prompt_data = {
             'target_column': results_data.get('target_column'),
             'best_model_type': best_model_name,
             'best_model_r_squared': results_data.get('best_model_info', {}).get('R-squared'),
-            'top_features': [f['feature'] for f in results_data.get('importances', [])[:3]],
-            'missing_strategy': results_data.get('missing_strategy', 'default') # Ensure missing_strategy is passed
+            'top_features_shap': [f"{f['feature']} (Importance: {f['importance']:.3f})" for f in results_data.get('importances', [])[:3]], # Changed to include importance
+            'missing_strategy': results_data.get('missing_strategy', 'default')
         }
     elif analysis_type == "Optimization":
-        # For optimization, model_info refers to the surrogate model, which is the best_model_info from the exploration phase
-        best_model_name = results_data.get('model_info', {}).get('Model Type', 'N/A')
+        best_model_name = results_data.get('model_info', {}).get('Model Type', 'N/A') # Surrogate model
         prompt_data = {
             'target_column': results_data.get('target_column'),
             'optimization_goal': results_data.get('goal'),
-            'surrogate_model_type': best_model_name, # This is the best model from initial run, used as surrogate
+            'surrogate_model_type': best_model_name, 
             'optimal_settings': results_data.get('optimal_settings'),
-            'predicted_target': results_data.get('predicted_target'),
-            'top_features_in_surrogate': [f['feature'] for f in results_data.get('importances', [])[:3]], # SHAP from the surrogate model
-            'missing_strategy': results_data.get('missing_strategy', 'default') # Ensure missing_strategy is passed
+            'predicted_target_at_optimum': results_data.get('predicted_target'),
+            'top_features_in_surrogate_shap': [f"{f['feature']} (Importance: {f['importance']:.3f})" for f in results_data.get('importances', [])[:3]],
+            'missing_strategy': results_data.get('missing_strategy', 'default')
         }
 
     model_desc_for_prompt = MODEL_EXPLANATIONS.get(best_model_name, {}).get('description', 'Standard machine learning model.')
-    base_prompt = f"The R&D team performed an '{analysis_type}' analysis. Key results: {json.dumps(prompt_data)}. The primary model used/identified as best was '{best_model_name}', which is described as: '{model_desc_for_prompt}'. Explain these results in detail for a scientist, focusing on actionable insights for synthetic biology or protein engineering. Elaborate on why the '{best_model_name}' model might have been chosen or performed well given its nature and the data context. If optimization, explain how the surrogate model ({best_model_name}) helps find optimal settings."
-    final_prompt = f"{base_prompt} {custom_prompt_addition}".strip()
-    print(f"LLM Prompt (simulated): {final_prompt[:600]}...") # Simulate sending to LLM
-    time.sleep(1) # Simulate LLM processing time
+    base_prompt = f"""
+    As an expert data scientist analyzing R&D experimental data, provide a detailed explanation of the '{analysis_type}' analysis.
+    Key results summary: {json.dumps(prompt_data)}.
+    The primary model involved was '{best_model_name}', which is described as: '{model_desc_for_prompt}'.
 
-    # Generate structured explanation based on analysis type
+    For a scientist audience (e.g., synthetic biology, protein engineering), explain:
+    1.  The overall objective and methodology of this '{analysis_type}' analysis.
+    2.  The significance of the best model ('{best_model_name}') chosen and its performance metrics (R-squared, MAE, RMSE, MAPE). Interpret what these metrics mean in practical terms for this experiment.
+    3.  Detailed insights from the SHAP feature importance analysis. Explain what the SHAP plot (typically a beeswarm plot showing feature impact direction and magnitude) reveals about the top features. How do these features influence the target variable?
+    4.  Guidance on interpreting the 'Actual vs. Predicted' and 'Residuals vs. Predicted' plots. What should a scientist look for in these plots to assess model performance and trustworthiness?
+    5.  If '{analysis_type}' is 'Optimization':
+        a.  Explain the role of the surrogate model ('{best_model_name}') in the optimization process.
+        b.  Interpret the suggested optimal settings and the predicted target value at these settings, including any confidence intervals.
+        c.  Explain how the surrogate decision tree (if provided) and response surface plots help in understanding the optimization landscape.
+    6.  Provide clear, actionable insights and next steps for the scientist based on these results. What should they investigate further or try in the lab?
+
+    Focus on clarity, practical implications, and scientific relevance.
+    {custom_prompt_addition}
+    """.strip()
+    print(f"LLM Prompt (simulated): {base_prompt[:800]}...") 
+    time.sleep(1) 
+
     if analysis_type == "Exploration":
-        best_model_info_expl = results_data.get('best_model_info', {})
-        best_model_name_expl = best_model_info_expl.get('Model Type', 'N/A')
-        best_model_props = MODEL_EXPLANATIONS.get(best_model_name_expl, {})
-        rationale = f"The **{best_model_name_expl}** was identified as the best performing model. Its strengths, such as {best_model_props.get('pros', 'good general performance')}, likely contributed. This model works by: {best_model_props.get('description', 'Standard machine learning approach.')}"
-
-        importances_df_data = results_data.get('importances', [])
-        importances_df = pd.DataFrame(importances_df_data) if importances_df_data else pd.DataFrame() # Handle empty
-        top_features_str = ", ".join(importances_df.head(3)['feature'].tolist()) if not importances_df.empty else "N/A"
-
-        r_squared_display = f"{best_model_info_expl.get('R-squared', 0):.3f}"
-        best_r_squared_val = best_model_info_expl.get('R-squared', 0.0) if isinstance(best_model_info_expl.get('R-squared'), (int, float)) else 0.0
-        mae_display = f"{best_model_info_expl.get('MAE', 0):.3f}"
-        rmse_display = f"{best_model_info_expl.get('RMSE', 0):.3f}"
-        mape_val = best_model_info_expl.get('MAPE')
-        mape_display = f"{mape_val:.2f}%" if isinstance(mape_val, (int, float)) and not np.isnan(mape_val) else "N/A"
-
+        binfo = results_data.get('best_model_info', {})
+        bname = binfo.get('Model Type', 'N/A')
+        bprops = MODEL_EXPLANATIONS.get(bname, {})
+        imp_df = pd.DataFrame(results_data.get('importances', []))
+        top_feats = ", ".join(imp_df.head(3)['feature'].tolist()) if not imp_df.empty else "Not available"
+        r2, mae, rmse, mape = binfo.get('R-squared',0), binfo.get('MAE',0), binfo.get('RMSE',0), binfo.get('MAPE')
+        
         return f"""
-        #### **Exploration Analysis: Uncovering Key Factors**
-        **Objective:** To identify input variables ('features') significantly impacting your output: '{results_data.get('target_column', 'N/A')}'.
-        **Methodology:** An AutoML pipeline evaluated multiple models, optimizing hyperparameters via Grid Search and cross-validation. Preprocessing included a **'{results_data.get('missing_strategy', 'default').replace('_', ' ').title()}'** strategy, One-Hot Encoding, and Standard Scaling.
-        **Best Model: {best_model_name_expl}**
-        * **Rationale for Choice:** {rationale}
-        * **Performance:** R-squared: **{r_squared_display}** (explains ~**{best_r_squared_val*100:.0f}%** of variance), MAE: **{mae_display}**, RMSE: **{rmse_display}**, MAPE: **{mape_display}**.
-        * **Top Influencers (SHAP analysis):** **{top_features_str}** are most critical for '{results_data.get('target_column', 'N/A')}'.
-        **Actionable Insights:**
-        1.  **Prioritize {top_features_str}** for investigation and further experiments.
-        2.  Explore the underlying biochemical or mechanistic reasons for their strong influence.
-        3.  Consider these high-impact features as primary candidates for fine-tuning in subsequent optimization experiments.
-        4.  Review the data quality and variability for these key features. High importance coupled with noisy data might indicate a need for more precise measurement techniques.
+        #### **Advanced Exploration Analysis: Unveiling Key Experimental Drivers**
+
+        **Objective & Methodology:**
+        The primary goal of this Exploration Analysis was to dissect the experimental data concerning '{results_data.get('target_column', 'N/A')}' and identify the most influential input variables (features). We employed an automated machine learning (AutoML) pipeline that rigorously evaluated a diverse set of regression models. Each model underwent hyperparameter optimization using Grid Search with cross-validation to ensure robustness and prevent overfitting. Data preprocessing was a critical first step, involving a '{str(results_data.get('missing_strategy', 'default')).replace('_', ' ').title()}' strategy for handling missing values, One-Hot Encoding for categorical features, and Standard Scaling for numerical features to bring them to a comparable range.
+
+        **Best Performing Model: {bname}**
+        * **Rationale & Nature:** The {bname} model emerged as the top performer. {bprops.get('description', 'It is a powerful and flexible algorithm.')} Its strengths, such as '{bprops.get('pros', 'good general performance and ability to capture complex patterns')}', likely contributed to its success in this dataset.
+        * **Performance Deep Dive:**
+            * **R-squared (R²): {r2:.3f}**. This indicates that approximately **{r2*100:.1f}%** of the variability in '{results_data.get('target_column', 'N/A')}' can be explained by the input features using this model. A higher R² (closer to 1) suggests a better fit.
+            * **Mean Absolute Error (MAE): {mae:.3f}**. On average, the model's predictions for '{results_data.get('target_column', 'N/A')}' are off by this amount. Lower is better.
+            * **Root Mean Squared Error (RMSE): {rmse:.3f}**. This is similar to MAE but penalizes larger errors more heavily. It's in the same units as the target variable.
+            * **Mean Absolute Percentage Error (MAPE): {f'{mape:.2f}%' if mape is not None else 'N/A'}**. This expresses the average prediction error as a percentage of the actual value, useful for relative error assessment (interpret with caution if actual values are close to zero).
+
+        **Interpreting Diagnostic Plots:**
+        * **Actual vs. Predicted Plot:** Ideally, points should cluster tightly around the diagonal (y=x) line. Deviations indicate prediction errors. Look for systematic biases (e.g., consistent over or under-prediction).
+        * **Residuals vs. Predicted Plot:** Residuals (actual - predicted) should be randomly scattered around the horizontal zero line. Patterns (e.g., a funnel shape, a curve) suggest issues like heteroscedasticity (non-constant variance of errors) or non-linearity not captured by the model.
+
+        **Key Feature Insights (from SHAP Analysis):**
+        The SHAP (SHapley Additive exPlanations) analysis provides a sophisticated view of feature importance. The beeswarm plot (if generated) shows:
+        * **Feature Importance:** Features are typically ranked by their mean absolute SHAP value.
+        * **Impact Direction & Magnitude:** For each data point (represented by a dot), its color often indicates the original feature value (high/low), and its position on the x-axis shows how much that feature value pushed the prediction higher (positive SHAP value) or lower (negative SHAP value) for that specific point.
+        * **Distribution:** The spread of dots for a feature shows the variability of its impact.
+        Based on this, the most critical factors influencing '{results_data.get('target_column', 'N/A')}' appear to be: **{top_feats}**. Examine the SHAP plot to understand if high values of these features tend to increase or decrease the target.
+
+        **Actionable Scientific Insights & Next Steps:**
+        1.  **Focus on {top_feats}:** These variables warrant the most attention in subsequent experimental design and mechanistic investigation.
+        2.  **Validate SHAP Directions:** Correlate the SHAP impact directions with existing scientific knowledge. Do high concentrations of a reagent increasing the target (as per SHAP) make sense biochemically?
+        3.  **Refine Experiments:** Use these insights to design more targeted experiments. If a feature has a strong positive impact, explore its upper range further (if feasible).
+        4.  **Data Quality for Key Features:** Ensure precise and accurate measurements for these high-impact features, as noise here can significantly affect model reliability.
+        5.  **Model Limitations:** While '{bname}' performed best, remember all models are simplifications. The R² value gives a sense of unexplained variance. Consider if unmeasured factors might play a role.
         {custom_prompt_addition}
         """
 
     elif analysis_type == "Optimization":
-        surrogate_model_info = results_data.get('model_info', {}) # This is the summary of the best model used as surrogate
-        surrogate_model_name = surrogate_model_info.get('Model Type', 'N/A')
-        surrogate_props = MODEL_EXPLANATIONS.get(surrogate_model_name, {})
+        s_info = results_data.get('model_info', {}) 
+        s_name = s_info.get('Model Type', 'N/A')
+        s_props = MODEL_EXPLANATIONS.get(s_name, {})
+        s_perf = results_data.get('best_model_info', {}) 
+        s_r2 = s_perf.get('R-squared', 0.0)
         
-        # Performance of the surrogate model (from its initial evaluation)
-        surrogate_perf_info = results_data.get('best_model_info', {}) # This is the original performance dict of the chosen surrogate
-        surrogate_r2 = surrogate_perf_info.get('R-squared', 0.0)
-
-
-        surrogate_explanation = f"The **{surrogate_model_name}** was selected as the surrogate model for this optimization. {surrogate_props.get('description', '')} This model was chosen because it demonstrated strong predictive power (R-squared: {surrogate_r2:.3f}) on your dataset during the initial evaluation phase. By using this validated model, we can efficiently simulate thousands of experimental conditions to predict outcomes without needing to run each in the lab, thereby guiding us to the optimal settings."
-
-        optimal_settings_data = results_data.get('optimal_settings', {})
-        optimal_settings_str = ", ".join([f"**{k}**: {v:.3f}" if isinstance(v, (int, float, np.number)) and not np.isnan(v) else f"**{k}**: {v}" for k, v in optimal_settings_data.items()])
-        goal_verb = "maximize" if results_data.get('goal') == "maximize" else "minimize"
+        opt_set = results_data.get('optimal_settings', {})
+        opt_str = ", ".join([f"**{k}**: {v:.3f}" if isinstance(v, (float, np.number)) and not np.isnan(v) else f"**{k}**: {v}" for k,v in opt_set.items()])
+        goal_v = "maximize" if results_data.get('goal') == "maximize" else "minimize"
+        pred_val, pred_low, pred_upp = results_data.get('predicted_target', np.nan), results_data.get('predicted_target_lower', np.nan), results_data.get('predicted_target_upper', np.nan)
         
-        predicted_val = results_data.get('predicted_target', np.nan)
-        predicted_lower = results_data.get('predicted_target_lower', np.nan)
-        predicted_upper = results_data.get('predicted_target_upper', np.nan)
-
-        importances_opt_df_data = results_data.get('importances', []) # SHAP importances from the surrogate model
-        importances_opt_df = pd.DataFrame(importances_opt_df_data) if importances_opt_df_data else pd.DataFrame()
-        top_shap_features_str = ", ".join(importances_opt_df.head(3)['feature'].tolist()) if not importances_opt_df.empty else "N/A"
-        
-        predicted_val_num = predicted_val if isinstance(predicted_val, (int, float)) and not np.isnan(predicted_val) else 0.0
-        predicted_lower_num = predicted_lower if isinstance(predicted_lower, (int, float)) and not np.isnan(predicted_lower) else 0.0
-        predicted_upper_num = predicted_upper if isinstance(predicted_upper, (int, float)) and not np.isnan(predicted_upper) else 0.0
+        imp_opt_df = pd.DataFrame(results_data.get('importances', []))
+        top_shap_opt = ", ".join(imp_opt_df.head(3)['feature'].tolist()) if not imp_opt_df.empty else "N/A"
 
         return f"""
-        #### **Optimization Analysis: Finding the Sweet Spot**
-        **Objective:** To identify optimal experimental conditions to **{goal_verb}** '{results_data.get('target_column', 'N/A')}'.
-        **Methodology & Surrogate Model:** {surrogate_explanation} A systematic grid search was performed across the defined ranges of your input variables using this surrogate model to predict the target output for various combinations.
-        **Optimal Settings Suggested:** {optimal_settings_str}
-        **Predicted Outcome:** Under these optimal conditions, the model predicts an approximate target value of **{predicted_val_num:.3f}** (with a 95% Confidence Interval: {predicted_lower_num:.3f} - {predicted_upper_num:.3f}).
-        **Key Insights from Surrogate Model ({surrogate_model_name}):**
-        * **SHAP analysis** on the surrogate model indicates that **{top_shap_features_str}** were the most influential features in its predictions for the conditions explored.
-        * The **response surface/curve plot** (if shown) and the **visual surrogate tree** offer graphical representations of the model's logic and how changes in key inputs impact the predicted output.
-        **Actionable Insights:**
-        1.  **Experimental Validation:** The most crucial next step is to **experimentally validate** these predicted optimal settings in your lab. Real-world experiments are essential to confirm the model's predictions.
-        2.  **Sensitivity Analysis:** Consider performing additional experiments slightly varying the recommended optimal settings to understand the sensitivity of your system. This helps in identifying robust operating ranges.
-        3.  **Practical Constraints:** Always consider any practical or safety constraints in your lab when implementing these optimal settings. The model provides a theoretical optimum, but real-world limitations may necessitate minor adjustments.
-        4.  **Iterative Optimization:** If initial validation is successful, consider using these results to refine your input ranges and perform another round of optimization for even finer tuning.
+        #### **Advanced Optimization Analysis: Pinpointing Optimal Experimental Conditions**
+
+        **Objective & Methodology:**
+        The aim of this Optimization Analysis was to identify experimental settings that **{goal_v}** your target variable: '{results_data.get('target_column', 'N/A')}'. This was achieved by first selecting a high-performing surrogate model, the **{s_name}** (R²: {s_r2:.3f} during its initial evaluation), to represent the complex relationships in your data. This surrogate model, chosen for its predictive accuracy ({s_props.get('description', 'It is a robust modeling technique.')}), then enabled an efficient search across a grid of possible input parameter combinations. This in-silico experimentation predicts outcomes without the immediate need for extensive lab work.
+
+        **Suggested Optimal Settings & Predicted Outcome:**
+        * **Optimal Conditions:** {opt_str}
+        * **Predicted Target Value:** Under these settings, the model predicts '{results_data.get('target_column', 'N/A')}' to be approximately **{pred_val:.3f}**.
+        * **Confidence Interval (95%):** The likely range for this prediction is between {pred_low:.3f} and {pred_upp:.3f}. This interval provides a measure of uncertainty around the prediction.
+
+        **Interpreting Surrogate Model Insights & Visualizations:**
+        * **Surrogate Model ({s_name}):** This model's performance (Actual vs. Predicted, Residuals plots shown for its evaluation run) gives confidence in its ability to guide the optimization.
+        * **SHAP Analysis on Surrogate:** The SHAP beeswarm plot for the surrogate model (if shown) indicates that **{top_shap_opt}** were key drivers of its predictions within the explored optimization space. Understanding these can help rationalize why the optimal settings work.
+        * **Surrogate Decision Tree:** The visual decision tree (if provided) offers a simplified, interpretable approximation of the surrogate model's logic, highlighting key decision rules based on (transformed) feature values.
+        * **Response Surface Plot:** This plot (if applicable, for 1 or 2 varied numerical inputs) visually maps how the predicted target changes as key inputs are varied, helping to understand the sensitivity and landscape around the optimum.
+
+        **Actionable Scientific Insights & Next Steps:**
+        1.  **Crucial Lab Validation:** The **most important next step** is to experimentally validate these predicted optimal settings in your laboratory. Models guide, experiments confirm.
+        2.  **Sensitivity & Robustness:** Perform a few experiments slightly varying the conditions around the suggested optimum (e.g., +/- 10% for key numerical inputs). This helps assess how sensitive the outcome is to small changes and identifies a robust operating window.
+        3.  **Consider Practicalities:** Always evaluate the suggested settings against practical laboratory constraints, safety, cost, and time. Minor adjustments might be needed.
+        4.  **Iterative Refinement:** If validation is promising, these results can inform the design of a new, more focused experimental set. The model can be retrained with new data for further iterative optimization.
+        5.  **Mechanism Exploration:** Why do these settings work? Use the SHAP insights and your scientific expertise to hypothesize underlying mechanisms.
         {custom_prompt_addition}
         """
-    return "Placeholder explanation: LLM analysis type not recognized or data missing."
+    return "Placeholder explanation: LLM analysis type or data missing."
 
 
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.LUX, dbc.icons.FONT_AWESOME],
@@ -753,10 +693,10 @@ def process_dataframe_for_ui(df, filename_display):
 app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children=[
     dcc.Store(id='store-raw-data'), dcc.Store(id='store-column-roles'),
     dcc.Store(id='store-exploration-results'), dcc.Store(id='store-optimization-results'),
-    dcc.Store(id='store-current-analysis-type'), dcc.Store(id='store-progress-text'), # Will store single current message
-    dcc.Interval(id='progress-interval', interval=500, n_intervals=0, disabled=True), # Slightly longer interval
-    dcc.Store(id='store-progress-steps', data=[]), # Stores the list of all step names
-    dcc.Store(id='store-current-step-index', data=0), # Stores the index of the current step
+    dcc.Store(id='store-current-analysis-type'), dcc.Store(id='store-progress-text'), 
+    dcc.Interval(id='progress-interval', interval=500, n_intervals=0, disabled=True), 
+    dcc.Store(id='store-progress-steps', data=[]), 
+    dcc.Store(id='store-current-step-index', data=0), 
     dcc.Store(id='active-tab-store', data='tab-data-upload'),
 
     dbc.Row(dbc.Col(html.H1(children=[html.I(className="fas fa-flask me-2"), "R&D Experiment Analysis Platform"], className="text-center my-4 display-5 text-primary fw-bold"), width=12)),
@@ -765,16 +705,16 @@ app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children
         dbc.NavItem(dbc.NavLink("2. Analysis & Results", active=False, href="#", id="nav-analysis", disabled=True, className="fw-medium fs-5 p-2")),
         dbc.NavItem(dbc.NavLink("3. AI Insights & Suggestions", active=False, href="#", id="nav-suggestions", disabled=True, className="fw-medium fs-5 p-2")),
     ], pills=True, className="nav-pills justify-content-center mb-4 shadow-sm bg-white rounded p-2"), width=12)),
-    dbc.Row(dbc.Col(html.Div(id='global-progress-message', className="my-3"), width=12)), # Progress message div
+    dbc.Row(dbc.Col(html.Div(id='global-progress-message'), width=12)), # Initially empty
     dbc.Card(dbc.CardBody([
         html.Div(id="tab-content", className="p-3"),
         dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights (Exploration)"], id="btn-goto-suggestions-expl", color="info", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'}),
         dbc.Button(children=[html.I(className="fas fa-lightbulb me-2"),"Proceed to AI Insights (Optimization)"], id="btn-goto-suggestions-opt", color="success", className="mt-3 d-block mx-auto", style={'display': 'none', 'width':'fit-content'})
     ]), className="mt-3 shadow-lg rounded"),
+    dbc.Modal([dbc.ModalHeader(id="modal-model-name"), dbc.ModalBody(id="modal-model-desc"), dbc.ModalFooter(dbc.Button("Close", id="close-model-modal", className="ms-auto", n_clicks=0))], id="model-explanation-modal", is_open=False, size="lg", scrollable=True),
     dbc.Row(dbc.Col(html.P("Powered by AutoML and Generative AI", className="text-center text-muted mt-5 small"), width=12))
 ])
 
-# Callback to render tab content based on active_tab
 @app.callback(
     Output('tab-content', 'children'),
     Input('active-tab-store', 'data'),
@@ -809,11 +749,8 @@ def render_tab_content(active_tab, raw_data_json, column_roles, analysis_type, e
     if active_tab == 'tab-data-upload':
         return data_setup_content
     elif active_tab == 'tab-analysis':
-        # Pass all required arguments to render_analysis_tab_content
         return render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json)
     elif active_tab == 'tab-suggestions':
-        # Pass all required arguments to render_suggestions_tab_content
-        # The '0' is for n_clicks_regenerate as it's not the trigger here.
         return render_suggestions_tab_content(active_tab, 0, analysis_type, exploration_data, optimization_data, None)
     return html.Div("Select a tab")
 
@@ -847,46 +784,55 @@ def switch_tabs_from_nav(n_data, n_analysis, n_suggestions, analysis_nav_disable
 
 @app.callback(
     Output('global-progress-message', 'children'),
-    Input('progress-interval', 'n_intervals'),
-    [State('store-progress-steps', 'data'), State('store-current-step-index', 'data'),
-     State('progress-interval', 'disabled'), State('store-current-analysis-type', 'data')] # Added analysis type for context
+    [Input('progress-interval', 'n_intervals'), 
+     Input('store-progress-steps', 'data'),      
+     Input('store-current-step-index', 'data')], 
+    [State('progress-interval', 'disabled'), 
+     State('store-current-analysis-type', 'data')] 
 )
-def update_progress_display(n, progress_steps, current_step_index, interval_disabled, analysis_type):
-    if interval_disabled or not progress_steps:
-        return ""
+def update_progress_display(n_intervals, progress_steps, current_step_index, interval_disabled, analysis_type):
+    if not progress_steps: 
+        return html.Div() # Initially empty, or a very minimal placeholder if preferred
 
     log_display_elements = []
-    is_complete = current_step_index >= len(progress_steps) -1
-    
+    is_complete = current_step_index >= (len(progress_steps) - 1) if progress_steps else True
     analysis_name = str(analysis_type).capitalize() if analysis_type else "Analysis"
 
     for i, step_text in enumerate(progress_steps):
         if i < current_step_index:
-            prefix = "✅ "
-            className = "mb-0 small text-muted"
+            prefix = html.I(className="fas fa-check-circle text-success me-2")
+            text_class = "text-muted"
         elif i == current_step_index and not is_complete:
-            prefix = "⏳ "
-            className = "mb-0 fw-bold text-primary"
-        elif i == current_step_index and is_complete: # Last step is also the current, and it's complete
-            prefix = "✅ "
-            className = "mb-0 small"
-        else: # Future steps
-            prefix = "⚪️ "
-            className = "mb-0 small text-secondary"
-        log_display_elements.append(html.P(f"{prefix}{step_text}", className=className))
+            prefix = dbc.Spinner(size="sm", color="primary", className="me-2")
+            text_class = "text-primary fw-bold"
+        elif i == current_step_index and is_complete: 
+            prefix = html.I(className="fas fa-check-circle text-success me-2")
+            text_class = "text-success fw-bold"
+        elif i > current_step_index : 
+            prefix = html.I(className="far fa-circle text-secondary me-2") 
+            text_class = "text-secondary"
+        else: 
+            prefix = html.I(className="fas fa-check-circle text-success me-2") 
+            text_class = "text-muted"
+        log_display_elements.append(html.Div([prefix, html.Span(step_text)], className=f"d-flex align-items-center mb-1 small {text_class}"))
 
     progress_percentage = ((current_step_index + 1) / len(progress_steps)) * 100 if len(progress_steps) > 0 else 0
     if is_complete:
         progress_percentage = 100
+        if log_display_elements and current_step_index == len(progress_steps) -1 :
+             log_display_elements[-1] = html.Div([html.I(className="fas fa-check-circle text-success me-2"), html.Span(progress_steps[-1])], className="d-flex align-items-center mb-1 small text-success fw-bold")
 
     header_icon = html.I(className="fas fa-check-circle text-success me-2") if is_complete else dbc.Spinner(size="sm", color="primary", className="me-2 align-middle")
     header_text = f"{analysis_name} Complete!" if is_complete else f"{analysis_name} in Progress..."
+    progress_bar_label = f"Step {min(current_step_index + 1, len(progress_steps))}/{len(progress_steps)}" if progress_steps else "0/0"
+    if is_complete and progress_steps:
+        progress_bar_label = f"Completed {len(progress_steps)}/{len(progress_steps)} steps"
 
-    return html.Div([
-        html.Div([header_icon, html.Span(header_text, className="fw-bold", style={'color': '#495057'})], className="d-flex align-items-center mb-2"),
-        dbc.Progress(value=progress_percentage, striped=True, animated=not is_complete, label=f"Step {min(current_step_index + 1, len(progress_steps))}/{len(progress_steps)}", style={'height': '20px', 'fontSize': '0.8rem'}, className="mb-2"),
-        dbc.Card(dbc.CardBody(log_display_elements, className="p-2"), className="mt-2 shadow-sm", style={'maxHeight': '200px', 'overflowY': 'auto', 'fontSize': '0.75rem', 'fontFamily': 'monospace', 'backgroundColor': '#f8f9fa'})
-    ], className="text-center")
+    return dbc.Card(dbc.CardBody([
+        html.Div([header_icon, html.Span(header_text, className="fw-bold h5", style={'color': '#495057'})], className="d-flex align-items-center mb-2 justify-content-center"),
+        dbc.Progress(value=progress_percentage, striped=not is_complete, animated=not is_complete, label=progress_bar_label, style={'height': '25px', 'fontSize': '0.9rem'}, className="mb-3"),
+        html.Div(log_display_elements, className="mt-2 text-start", style={'maxHeight': '250px', 'overflowY': 'auto', 'fontSize': '0.8rem', 'fontFamily': 'monospace', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px', 'borderRadius':'5px'})
+    ]), className="shadow-sm")
 
 
 @app.callback(
@@ -942,7 +888,16 @@ def confirm_setup_and_proceed(n_clicks, exp_type, inputs, output_var, ignored, m
 )
 def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json): 
     if active_tab != 'tab-analysis': 
-        return html.Div() 
+        return html.Div([
+            # Ensure placeholders for tables exist if they are inputs to global callbacks
+            html.Div(id='exploration-results-area', style={'display':'none'}),
+            html.Div(id='optimization-results-area', style={'display':'none'}),
+            # Add empty tables with IDs if they are direct inputs to callbacks
+            # This ensures their IDs are in the layout from the start.
+            html.Div(dash_table.DataTable(id='model-comparison-table', data=[], columns=[]), style={'display': 'none'}),
+            html.Div(dash_table.DataTable(id='surrogate-candidates-table', data=[], columns=[]), style={'display': 'none'})
+        ])
+
 
     if not raw_data_json:
         return dbc.Alert("No data uploaded. Please go back to 'Data & Setup' tab.", color="warning")
@@ -952,34 +907,53 @@ def render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_dat
         return dbc.Alert("Column roles or analysis type not defined. Please complete setup on 'Data & Setup' tab.", color="warning")
 
     target_column = column_roles.get('target_for_analysis')
-    df = pd.read_json(raw_data_json, orient='split')
-    if not pd.api.types.is_numeric_dtype(df[target_column]):
-        return dbc.Alert(f"Error: Target column '{target_column}' must be numeric for regression analysis.", color="danger")
     
-    for col in column_roles.get('inputs', []):
-        if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
-            return dbc.Alert(f"Error: Input column '{col}' has an unsupported data type ({df[col].dtype}). Please ensure features are numeric, string/object (for categorical), or boolean.", color="danger")
+    try:
+        df = pd.read_json(raw_data_json, orient='split')
+        if target_column not in df.columns:
+            return dbc.Alert(f"Error: Target column '{target_column}' not found in the uploaded data.", color="danger")
+        if not pd.api.types.is_numeric_dtype(df[target_column]):
+            return dbc.Alert(f"Error: Target column '{target_column}' must be numeric for regression analysis.", color="danger")
+        
+        for col in column_roles.get('inputs', []):
+            if col not in df.columns:
+                 return dbc.Alert(f"Error: Input column '{col}' not found in the uploaded data.", color="danger")
+            if not (pd.api.types.is_numeric_dtype(df[col]) or pd.api.types.is_string_dtype(df[col]) or pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]) or pd.api.types.is_bool_dtype(df[col])):
+                return dbc.Alert(f"Error: Input column '{col}' has an unsupported data type ({df[col].dtype}). Please ensure features are numeric, string/object (for categorical), or boolean.", color="danger")
+    except Exception as e_df_check:
+        return dbc.Alert(f"Error processing data columns: {str(e_df_check)}", color="danger")
+
+
+    exploration_ui = html.Div([
+        html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
+        html.P("This analysis will evaluate multiple machine learning models to identify which input variables (features) have the most significant impact on your selected target output. It helps in understanding key drivers and relationships within your data."),
+        dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
+        dcc.Loading(id="loading-exploration", type="default", children=[html.Div(id="exploration-results-area")]) # Populated by callback
+    ])
+    
+    optimization_ui = html.Div([
+        html.H3(f"Optimization Analysis: Targeting '{target_column}'", className="mb-3 text-success"),
+        html.P(f"This analysis aims to find the optimal combination of input variable settings to either maximize or minimize your selected target output: '{target_column}'. It uses the best model identified from an initial evaluation to predict outcomes over a range of settings."),
+        dbc.Label("Optimization Goal:", className="fw-bold"),
+        dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
+        html.P("Note: For numerical inputs, ranges for optimization are inferred from your data's min/max values. Categorical inputs are tested using their unique values present in the dataset.", className="small text-muted"),
+        dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
+        dcc.Loading(id="loading-optimization", type="default", children=[html.Div(id="optimization-results-area")]) # Populated by callback
+    ])
+
+    # Always render placeholders for the DataTables so their IDs exist in the layout for the modal callback
+    # These will be overwritten by the actual tables when results are generated.
+    placeholder_expl_table = html.Div(dash_table.DataTable(id='model-comparison-table', data=[], columns=[]), style={'display': 'none'})
+    placeholder_opt_table = html.Div(dash_table.DataTable(id='surrogate-candidates-table', data=[], columns=[]), style={'display': 'none'})
 
 
     if analysis_type == 'exploration':
-        return html.Div([
-            html.H3(f"Exploration Analysis: Understanding '{target_column}'", className="mb-3 text-info"),
-            html.P("This analysis will evaluate multiple machine learning models to identify which input variables (features) have the most significant impact on your selected target output. It helps in understanding key drivers and relationships within your data."),
-            dbc.Button(children=[html.I(className="fas fa-rocket me-2"), "Run Exploration AutoML"], id="btn-run-exploration-automl", color="info", className="my-3 btn-lg w-100 shadow"),
-            dcc.Loading(id="loading-exploration", type="default", children=[html.Div(id="exploration-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")])
-        ])
+        return html.Div([exploration_ui, placeholder_opt_table])
     elif analysis_type == 'optimization':
-        numerical_inputs = [col for col in column_roles.get('inputs', []) if pd.api.types.is_numeric_dtype(df[col])]
-        return html.Div([
-            html.H3(f"Optimization Analysis: Targeting '{target_column}'", className="mb-3 text-success"),
-            html.P(f"This analysis aims to find the optimal combination of input variable settings to either maximize or minimize your selected target output: '{target_column}'. It uses the best model identified from an initial evaluation to predict outcomes over a range of settings."),
-            dbc.Label("Optimization Goal:", className="fw-bold"),
-            dcc.Dropdown(id='dropdown-optimization-goal', options=[{'label': 'Maximize Target', 'value': 'maximize'}, {'label': 'Minimize Target', 'value': 'minimize'}], value='maximize', clearable=False, className="mb-3"),
-            html.P("Note: For numerical inputs, ranges for optimization are inferred from your data's min/max values. Categorical inputs are tested using their unique values present in the dataset.", className="small text-muted") if numerical_inputs else html.P("Note: Categorical inputs will be tested with their unique values. No numerical inputs detected for range-based optimization.", className="small text-muted"),
-            dbc.Button(children=[html.I(className="fas fa-bullseye me-2"), "Run Optimization AutoML"], id="btn-run-optimization-automl", color="success", className="my-3 btn-lg w-100 shadow"),
-            dcc.Loading(id="loading-optimization", type="default", children=[html.Div(id="optimization-results-area", className="mt-4 p-3 border rounded bg-white shadow-sm")])
-        ])
+        return html.Div([optimization_ui, placeholder_expl_table])
+    
     return dbc.Alert("Selected analysis type not recognized or setup incomplete.", color="warning")
+
 
 @app.callback(
     [Output('exploration-results-area', 'children'), Output('store-exploration-results', 'data'),
@@ -997,42 +971,53 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
     if not n_clicks:
         return dash.no_update, dash.no_update, True, None, True, [], 0, {'display': 'none'}
 
-    _captured_progress_steps_list, _captured_current_idx = [], 0
+    initial_progress_steps = [f"Validating Inputs & Data..."]
+    initial_progress_steps.append(f"Preprocessing Data...")
+    initial_progress_steps.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
+    initial_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Finalizing Results..."])
+    
+    _captured_progress_steps_list = list(initial_progress_steps) 
+    _captured_current_idx = 0
+
     def _progress_updater_local(steps_list, current_idx_val):
         nonlocal _captured_progress_steps_list, _captured_current_idx
-        _captured_progress_steps_list = steps_list
+        _captured_progress_steps_list = list(steps_list) 
         _captured_current_idx = current_idx_val
         if steps_list and current_idx_val < len(steps_list):
              print(f"Expl Progress (Internal): Step {current_idx_val + 1}/{len(steps_list)}: {steps_list[current_idx_val]}")
-
+    
     if raw_data_json is None:
-        return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, [], 0, {'display': 'none'}
+        return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, initial_progress_steps, 0, {'display': 'none'}
     if column_roles is None or not isinstance(column_roles, dict) or \
        not column_roles.get('target_for_analysis') or not column_roles.get('inputs'):
-        return dbc.Alert("Column roles not defined.", color="danger"), None, True, "Error: Setup incomplete", True, [], 0, {'display': 'none'}
+        return dbc.Alert("Column roles not defined.", color="danger"), None, True, "Error: Setup incomplete", True, initial_progress_steps, 0, {'display': 'none'}
 
     df = pd.read_json(raw_data_json, orient='split')
     target_column = column_roles['target_for_analysis']
     feature_columns = column_roles['inputs']
     missing_strategy = column_roles.get('missing_strategy', 'drop_rows')
-    
-    final_progress_steps_list_for_store = []
-    final_current_step_idx_for_store = 0
-    current_step_text_for_store = "Initiating Exploration Analysis..."
+    current_step_text_for_store = "Initiating Exploration Analysis..." 
 
     try:
-        all_model_results, best_model_info_dict, importances, shap_plot_fig, final_progress_steps_list_for_store = \
+        all_model_results, best_model_info_dict, importances, shap_beeswarm_plot_src, \
+        final_progress_steps_from_pipeline, actual_vs_pred_fig, resid_fig = \
             run_exploration_automl(df, target_column, feature_columns, missing_strategy, _progress_updater_local)
         
-        final_current_step_idx_for_store = len(final_progress_steps_list_for_store) - 1 if final_progress_steps_list_for_store else 0
+        _captured_progress_steps_list = list(final_progress_steps_from_pipeline)
+        _captured_current_idx = len(_captured_progress_steps_list) - 1 
         current_step_text_for_store = "Exploration Complete!"
         
     except Exception as e:
         print(f"Error Exploration AutoML: {e}\n{traceback.format_exc()}")
-        current_step_text_for_store = "Error during exploration."
-        final_progress_steps_list_for_store = _captured_progress_steps_list
-        final_current_step_idx_for_store = _captured_current_idx
-        return dbc.Alert(f"Exploration Error: {str(e)}", color="danger"), None, True, current_step_text_for_store, True, final_progress_steps_list_for_store, final_current_step_idx_for_store, {'display': 'none'}
+        error_message = f"Exploration Error: {str(e)}"
+        current_step_text_for_store = f"Error: {str(e)}"
+        # Ensure _captured_current_idx is valid for _captured_progress_steps_list
+        if not _captured_progress_steps_list: _captured_progress_steps_list = ["Error occurred"]
+        _captured_current_idx = min(_captured_current_idx, len(_captured_progress_steps_list) - 1)
+
+        return dbc.Alert(error_message, color="danger"), \
+               None, True, current_step_text_for_store, True, \
+               _captured_progress_steps_list, _captured_current_idx, {'display': 'none'}
 
     best_model_name = best_model_info_dict.get('Model Type', 'N/A')
     hyperparam_defs = best_model_info_dict.get('Hyperparameter_Definitions', {})
@@ -1087,7 +1072,7 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
                              columns=[ {"name": col_name, "id": col_id} for col_id, col_name in 
                                         [("Model","Model"), ("R²","R²"), ("MAE","MAE"), ("RMSE","RMSE"), ("MAPE","MAPE"), 
                                          ("CV R²","CV R²"), ("Time (s)","Time (s)"), ("Details_action","Details")]],
-                             data=comparison_table_data, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1,
+                             data=comparison_table_data, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1 if MODELS_TO_EVALUATE else 1,
                              style_table={'overflowX': 'auto'}, style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
                              style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
                              style_data_conditional=[
@@ -1095,12 +1080,23 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
                                  {'if': {'column_id': 'Details_action'}, 'cursor': 'pointer', 'color': 'blue', 'textDecoration': 'underline'}
                              ]),
     ], className="mb-4")
+    
+    shap_plot_display = html.Div([
+        html.H5("SHAP Feature Importance & Impact", className="mt-4 mb-2 text-secondary"),
+        html.P("This plot shows how much each feature contributes to the model's predictions. Dots to the right increase the prediction, left decrease. Color often indicates feature value (red=high, blue=low).", className="small text-muted"),
+        html.Img(src=shap_beeswarm_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src else dbc.Alert("SHAP plot could not be generated.", color="warning")
+    ], className="mb-4 text-center")
 
     results_layout = html.Div([
         dbc.Alert(f"Exploration AutoML complete for '{target_column}'.", color="info", className="mt-2"),
-        kpi_cards, model_comparison_table_component, best_model_details_card,
-        html.H5("Best Model Feature Importance (SHAP)", className="mt-4 mb-2 text-secondary"),
-        dcc.Graph(id='exploration-shap-plot-graph', figure=shap_plot_fig if shap_plot_fig and shap_plot_fig.get('data') else go.Figure().update_layout(title_text="SHAP Plot not available", annotations=[dict(text="SHAP values could not be computed or model does not support SHAP.", showarrow=False)]))
+        kpi_cards, 
+        model_comparison_table_component, 
+        best_model_details_card,
+        dbc.Row([
+            dbc.Col(dcc.Graph(id='actual-vs-predicted-plot', figure=actual_vs_pred_fig if actual_vs_pred_fig else go.Figure()), md=6),
+            dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot', figure=resid_fig if resid_fig else go.Figure()), md=6)
+        ], className="mb-4"),
+        shap_plot_display
     ])
 
     cleaned_best_model_info = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_dict.items() if k != 'Pipeline'}
@@ -1108,9 +1104,16 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
     results_data_for_store = {
         'all_model_results': cleaned_all_model_results, 'best_model_info': cleaned_best_model_info,
         'importances': importances.to_dict('records') if not importances.empty else [],
-        'target_column': target_column, 'missing_strategy': missing_strategy
+        'target_column': target_column, 'missing_strategy': missing_strategy,
+        'actual_vs_predicted_fig': actual_vs_pred_fig.to_json() if actual_vs_pred_fig and isinstance(actual_vs_pred_fig, go.Figure) else None,
+        'residuals_vs_predicted_fig': resid_fig.to_json() if resid_fig and isinstance(resid_fig, go.Figure) else None,
+        'shap_beeswarm_plot_src': shap_beeswarm_plot_src 
     }
-    return results_layout, results_data_for_store, False, current_step_text_for_store, True, final_progress_steps_list_for_store, final_current_step_idx_for_store, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
+    # Set progress-interval to disabled=True as the callback is finishing
+    return results_layout, results_data_for_store, False, current_step_text_for_store, True, _captured_progress_steps_list, _captured_current_idx, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
+
+# ... (rest of the callbacks, including run_optimization_analysis_callback, toggle_model_explanation_modal, etc.)
+# Ensure run_optimization_analysis_callback also has robust error handling and correct progress step management.
 
 @app.callback(
     [Output("model-explanation-modal", "is_open"), Output("modal-model-name", "children"), Output("modal-model-desc", "children")],
@@ -1132,10 +1135,10 @@ def toggle_model_explanation_modal(active_cell_expl, active_cell_opt, close_clic
         return False, dash.no_update, dash.no_update
 
     if "model-comparison-table.active_cell" in triggered_prop_id and active_cell:
-        if active_cell['column_id'] == 'Details_action' and expl_table_data: # Check if data exists
+        if active_cell['column_id'] == 'Details_action' and expl_table_data and active_cell['row'] < len(expl_table_data): 
             model_name_to_show = expl_table_data[active_cell['row']]['Model']
     elif "surrogate-candidates-table.active_cell" in triggered_prop_id and active_cell:
-        if active_cell['column_id'] == 'Details_action' and opt_table_data: # Check if data exists
+        if active_cell['column_id'] == 'Details_action' and opt_table_data and active_cell['row'] < len(opt_table_data): 
             model_name_to_show = opt_table_data[active_cell['row']]['Model']
             
     if model_name_to_show:
@@ -1146,7 +1149,7 @@ def toggle_model_explanation_modal(active_cell_expl, active_cell_opt, close_clic
             html.H6("Potential Weaknesses:", className="mt-3"), html.P(expl.get("cons", "N/A"))
         ]
         if expl.get("hyperparameters"):
-            desc_children.append(html.H6("Key Hyperparameters:", className="mt-3"))
+            desc_children.append(html.H6("Key Hyperparameters (General):", className="mt-3"))
             for hp, hp_desc in expl["hyperparameters"].items():
                 desc_children.append(html.P([html.Strong(f"{hp}: "), hp_desc], className="small"))
         return True, f"{model_name_to_show} Details", desc_children
@@ -1170,44 +1173,57 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
     if not n_clicks:
         return dash.no_update, dash.no_update, True, None, True, [], 0, {'display': 'none'}
 
-    _captured_progress_steps_list_opt, _captured_current_idx_opt = [], 0
+    initial_progress_steps_opt = [f"Validating Inputs & Data..."]
+    initial_progress_steps_opt.append(f"Preprocessing Data...")
+    initial_progress_steps_opt.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
+    initial_progress_steps_opt.extend([
+        "Evaluating Best Model...", "Calculating SHAP Values for Best Model...",
+        "Generating Surrogate Tree...", "Optimizing (Grid Search over Parameter Space)...", 
+        "Evaluating Optimal Settings...", "Generating Optimization Visualizations...", "Finalizing Results..."
+    ])
+
+    _captured_progress_steps_list_opt = list(initial_progress_steps_opt)
+    _captured_current_idx_opt = 0
+    
     def _progress_updater_local_opt(steps_list, current_idx_val):
         nonlocal _captured_progress_steps_list_opt, _captured_current_idx_opt
-        _captured_progress_steps_list_opt = steps_list
+        _captured_progress_steps_list_opt = list(steps_list)
         _captured_current_idx_opt = current_idx_val
         if steps_list and current_idx_val < len(steps_list):
             print(f"Opt Progress (Internal): Step {current_idx_val + 1}/{len(steps_list)}: {steps_list[current_idx_val]}")
 
-
-    if raw_data_json is None: return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, [], 0, {'display': 'none'}
-    if column_roles is None or not opt_goal: return dbc.Alert("Column roles or optimization goal not set.", color="danger"), None, True, "Error: Setup incomplete", True, [], 0, {'display': 'none'}
+    if raw_data_json is None: return dbc.Alert("No data uploaded.", color="danger"), None, True, "Error: No data", True, initial_progress_steps_opt, 0, {'display': 'none'}
+    if column_roles is None or not opt_goal: return dbc.Alert("Column roles or optimization goal not set.", color="danger"), None, True, "Error: Setup incomplete", True, initial_progress_steps_opt, 0, {'display': 'none'}
 
     df = pd.read_json(raw_data_json, orient='split')
     target_column = column_roles['target_for_analysis']
     feature_columns = column_roles['inputs']
     missing_strategy = column_roles.get('missing_strategy', 'drop_rows')
-
-    final_progress_steps_list_for_store_opt = []
-    final_current_step_idx_for_store_opt = 0
     current_step_text_for_store_opt = "Initiating Optimization Analysis..."
 
     try:
         feature_ranges = {col: {'min': df[col].min(), 'max': df[col].max()} for col in feature_columns if pd.api.types.is_numeric_dtype(df[col]) and col in df.columns and df[col].nunique() > 1} 
-
-        all_model_results_opt, best_model_info_opt_dict, importances_opt, shap_plot_fig_opt, final_progress_steps_list_for_store_opt, \
-        optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
-        response_fig, surrogate_tree_text, model_info_opt_summary, surrogate_tree_plot_src = \
+        
+        all_model_results_opt, best_model_info_opt_dict, importances_opt, shap_beeswarm_plot_src_opt, \
+        final_progress_steps_from_pipeline_opt, optimal_settings, predicted_target, \
+        predicted_target_lower, predicted_target_upper, response_fig, surrogate_tree_text, \
+        model_info_opt_summary, surrogate_tree_plot_src, actual_vs_pred_fig_opt, resid_fig_opt = \
             run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges, missing_strategy, _progress_updater_local_opt)
         
-        final_current_step_idx_for_store_opt = len(final_progress_steps_list_for_store_opt) - 1 if final_progress_steps_list_for_store_opt else 0
+        _captured_progress_steps_list_opt = list(final_progress_steps_from_pipeline_opt)
+        _captured_current_idx_opt = len(_captured_progress_steps_list_opt) - 1
         current_step_text_for_store_opt = "Optimization Complete!"
 
     except Exception as e:
         print(f"Error Optimization AutoML: {e}\n{traceback.format_exc()}")
-        current_step_text_for_store_opt = "Error during optimization."
-        final_progress_steps_list_for_store_opt = _captured_progress_steps_list_opt
-        final_current_step_idx_for_store_opt = _captured_current_idx_opt
-        return dbc.Alert(f"Optimization Error: {str(e)}", color="danger"), None, True, current_step_text_for_store_opt, True, final_progress_steps_list_for_store_opt, final_current_step_idx_for_store_opt, {'display': 'none'}
+        error_message_opt = f"Optimization Error: {str(e)}"
+        current_step_text_for_store_opt = f"Error: {str(e)}"
+        if not _captured_progress_steps_list_opt: _captured_progress_steps_list_opt = ["Error occurred"]
+        _captured_current_idx_opt = min(_captured_current_idx_opt, len(_captured_progress_steps_list_opt)-1)
+
+        return dbc.Alert(error_message_opt, color="danger"), \
+               None, True, current_step_text_for_store_opt, True, \
+               _captured_progress_steps_list_opt, _captured_current_idx_opt, {'display': 'none'}
 
     optimal_settings_kpi_cards = [
         dbc.Col(dbc.Card(dbc.CardBody([
@@ -1241,7 +1257,12 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
             html.H6("Strengths:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(surrogate_model_name, {}).get('pros', 'N/A')),
             html.H6("Weaknesses:", className="mt-2"), html.P(MODEL_EXPLANATIONS.get(surrogate_model_name, {}).get('cons', 'N/A')),
         ], title=f"About the {surrogate_model_name} Model")], start_collapsed=True, className="mb-3"),
-        *surrogate_hyperparam_expl_div
+        *surrogate_hyperparam_expl_div,
+        html.H6("Surrogate Model Performance (on Test Set):", className="mt-3"),
+        dbc.Row([
+            dbc.Col(html.P(f"R-squared: {best_model_info_opt_dict.get('R-squared', 0):.3f}", className="small"), width=6),
+            dbc.Col(html.P(f"MAE: {best_model_info_opt_dict.get('MAE', 0):.3f}", className="small"), width=6)
+        ])
     ]), className="mb-4 shadow-sm bg-light")
 
     comparison_table_data_opt = []
@@ -1262,7 +1283,7 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
                              columns=[ {"name": col_name, "id": col_id} for col_id, col_name in 
                                         [("Model","Model"), ("R²","R²"), ("MAE","MAE"), ("RMSE","RMSE"), ("MAPE","MAPE"), 
                                          ("CV R²","CV R²"), ("Time (s)","Time (s)"), ("Details_action","Details")]],
-                             data=comparison_table_data_opt, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1,
+                             data=comparison_table_data_opt, sort_action='native', page_size=len(MODELS_TO_EVALUATE)+1 if MODELS_TO_EVALUATE else 1,
                              style_table={'overflowX': 'auto'}, style_cell={'textAlign': 'left', 'padding': '8px', 'fontFamily': 'Inter, sans-serif', 'fontSize': '0.85rem'},
                              style_header={'backgroundColor': '#e9ecef', 'fontWeight': 'bold'},
                              style_data_conditional=[
@@ -1284,14 +1305,24 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
             html.P("Visual plot not available or generation failed. Textual rules based on transformed features:", className="small text-muted"),
             dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text if surrogate_tree_text else "Tree text not available.", style={'whiteSpace': 'pre-wrap', 'maxHeight': '200px', 'overflowY':'auto', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px'})), className="mb-4")
         ])
+        
+    shap_plot_opt_display = html.Div([
+        html.H5("SHAP Feature Importance & Impact (Surrogate Model)", className="mt-4 mb-2 text-secondary"),
+        html.P("This plot shows feature impacts for the surrogate model used in optimization.", className="small text-muted"),
+        html.Img(src=shap_beeswarm_plot_src_opt, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src_opt else dbc.Alert("SHAP plot for surrogate model could not be generated.", color="warning")
+    ], className="mb-4 text-center")
 
     results_layout = html.Div([
         dbc.Alert(f"Optimization AutoML complete for '{target_column}'. Goal: {opt_goal.capitalize()}.", color="success", className="mt-2"),
         dbc.Row(optimal_settings_kpi_cards + [predicted_target_kpi], className="mb-3 g-3 justify-content-center"),
         surrogate_candidates_table_component,
         surrogate_model_details_card,
+        dbc.Row([
+            dbc.Col(dcc.Graph(id='actual-vs-predicted-plot-opt', figure=actual_vs_pred_fig_opt if actual_vs_pred_fig_opt else go.Figure()), md=6),
+            dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot-opt', figure=resid_fig_opt if resid_fig_opt else go.Figure()), md=6)
+        ], className="mb-4"),
         html.Div(dcc.Graph(figure=response_fig), className="mb-3") if response_fig and response_fig.get('data') else html.P("Response surface plot not available (requires at least one varied numerical feature).", className="text-muted small text-center"),
-        html.Div(dcc.Graph(figure=shap_plot_fig_opt), className="mb-3") if shap_plot_fig_opt and shap_plot_fig_opt.get('data') else html.P("SHAP plot for surrogate model not available.", className="text-muted small text-center"),
+        shap_plot_opt_display,
         surrogate_tree_plot_layout
     ])
 
@@ -1308,9 +1339,12 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         'importances': importances_opt.to_dict('records') if not importances_opt.empty else [], 
         'model_info': cleaned_model_info_opt_summary, 
         'surrogate_tree_text': surrogate_tree_text,
-        'surrogate_tree_plot_src': surrogate_tree_plot_src
+        'surrogate_tree_plot_src': surrogate_tree_plot_src,
+        'actual_vs_predicted_fig_opt': actual_vs_pred_fig_opt.to_json() if actual_vs_pred_fig_opt and isinstance(actual_vs_pred_fig_opt, go.Figure) else None,
+        'residuals_vs_predicted_fig_opt': resid_fig_opt.to_json() if resid_fig_opt and isinstance(resid_fig_opt, go.Figure) else None,
+        'shap_beeswarm_plot_src_opt': shap_beeswarm_plot_src_opt
     }
-    return results_layout, results_data_for_store, False, current_step_text_for_store_opt, True, final_progress_steps_list_for_store_opt, final_current_step_idx_for_store_opt, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
+    return results_layout, results_data_for_store, False, current_step_text_for_store_opt, True, _captured_progress_steps_list_opt, _captured_current_idx_opt, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
 
 @app.callback(Output('active-tab-store', 'data', allow_duplicate=True),
