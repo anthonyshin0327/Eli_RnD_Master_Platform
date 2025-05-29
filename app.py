@@ -29,6 +29,8 @@ import plotly.express as px # For scatter plots
 import matplotlib
 matplotlib.use('Agg') # Use non-interactive backend for matplotlib for Dash
 import matplotlib.pyplot as plt
+# statsmodels is needed for px.scatter trendline="ols"
+import statsmodels.api as sm
 
 
 # --- Embedded Demo Data ---
@@ -184,32 +186,33 @@ for key in MODEL_EXPLANATIONS.keys():
         })
 
 
-def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges_from_ui=None): # Renamed feature_ranges to feature_ranges_from_ui for clarity
+def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy, progress_callback, analysis_type, optimization_goal=None, feature_ranges_from_ui=None):
     print(f"Starting AutoML pipeline for {analysis_type} analysis on target: {target_column}")
     all_model_results = []
     best_model_info_dict = {} 
-    importances_df = pd.DataFrame()
+    importances_df = pd.DataFrame() # Initialize as empty DataFrame
     shap_beeswarm_plot_src = None
     
-    # Initialize plots to None or placeholder figures
     actual_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Actual vs. Predicted (Pending)")))
     actual_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
     residuals_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Residuals vs. Predicted (Pending)")))
     residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
-    basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Basic Feature Importance (Pending)")))
+    basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Basic Feature Importance (Pending)"))) # Initialize placeholder
     basic_feature_importance_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
     
+    decision_tree_specific_plot_src = None
+
     optimal_settings = {}
     predicted_target, predicted_target_lower, predicted_target_upper = np.nan, np.nan, np.nan
     response_surface_fig = {}
     surrogate_tree_text = "Not generated."
     model_info_summary = {}
-    surrogate_tree_plot_src = None
+    surrogate_tree_plot_src = None 
 
     current_progress_steps = [f"Validating Inputs & Data..."]
     current_progress_steps.append(f"Preprocessing Data...")
     current_progress_steps.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
-    current_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances..."])
+    current_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances...", "Generating Model-Specific Visualizations..."])
     
     optimization_specific_steps = []
     if analysis_type == 'optimization':
@@ -237,7 +240,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         else:
             raise ValueError(f"Invalid missing value strategy: {missing_value_strategy}")
 
-        if df_processed.shape[0] < 5 : # Minimum rows for train/test split and meaningful analysis
+        if df_processed.shape[0] < 5 :
              raise ValueError(f"Not enough data rows ({df_processed.shape[0]}) after handling missing values. Need at least 5.")
 
         X = df_processed[feature_columns]
@@ -248,16 +251,14 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
         numerical_features = X.select_dtypes(include=np.number).columns.tolist()
         categorical_features = X.select_dtypes(exclude=np.number).columns.tolist()
         
-        # Ensure test size is at least 1, or handle small datasets appropriately
         test_size_actual = 0.2
-        if len(y) * test_size_actual < 1: # If 20% is less than 1 sample
-            if len(y) >=2: # Need at least 2 samples for a split
-                 test_size_actual = 1 / len(y) # Make test set size 1
-            else: # Cannot split if less than 2 samples
-                raise ValueError(f"Dataset too small ({len(y)} samples) to split into training and testing sets.")
+        if len(y) * test_size_actual < 1:
+            if len(y) >=2:
+                 test_size_actual = 1 / len(y)
+            else:
+                 raise ValueError(f"Dataset too small ({len(y)} samples) to split into training and testing sets. Need at least 2 for a split.")
 
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_actual, random_state=42, stratify=None if len(y) < 10 else y if y.nunique() > 1 and len(y)//y.nunique() >=2 else None)
-
 
         if X_train.empty or X_test.empty: raise ValueError("Training or testing data is empty after split. This can happen with very small datasets.")
 
@@ -294,22 +295,40 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             
             start_time = time.time()
             current_best_estimator_for_model = None; best_params_for_model = {}; best_cv_score_for_model = -float('inf')
-            # Adjust CV folds for small datasets
             cv_folds = min(5, len(X_train_processed_df) -1 if len(X_train_processed_df) > 1 else 1) 
-            if len(X_train_processed_df) < 2 : cv_folds = 1 # Cannot do CV with less than 2 samples
+            if len(X_train_processed_df) < 2 : cv_folds = 1
 
-            if cv_folds < 2 : # No cross-validation if not enough samples
+            if cv_folds < 2 :
                 current_best_estimator_for_model = estimator
                 current_best_estimator_for_model.fit(X_train_processed_df, y_train)
                 y_train_pred_cv = current_best_estimator_for_model.predict(X_train_processed_df)
                 best_cv_score_for_model = r2_score(y_train, y_train_pred_cv) if len(y_train) > 0 else np.nan
             elif param_grid_for_estimator:
-                grid_search = GridSearchCV(estimator, param_grid_for_estimator, cv=cv_folds, scoring='r2', n_jobs=-1, error_score='raise')
-                grid_search.fit(X_train_processed_df, y_train)
-                current_best_estimator_for_model = grid_search.best_estimator_
-                best_params_for_model = grid_search.best_params_
-                best_cv_score_for_model = grid_search.best_score_
-            else: # No grid search, just fit the model
+                try:
+                    grid_search = GridSearchCV(estimator, param_grid_for_estimator, cv=cv_folds, scoring='r2', n_jobs=-1, error_score='raise') # Changed to 'raise'
+                    grid_search.fit(X_train_processed_df, y_train)
+                    current_best_estimator_for_model = grid_search.best_estimator_
+                    best_params_for_model = grid_search.best_params_
+                    best_cv_score_for_model = grid_search.best_score_
+                except Exception as e_grid:
+                    print(f"GridSearchCV failed for {model_name}: {e_grid}. Skipping this model configuration.")
+                    # Ensure a valid estimator is set if grid search fails, or handle appropriately
+                    current_best_estimator_for_model = None # Mark as failed for this config
+                    best_cv_score_for_model = np.nan # Or some indicator of failure
+                    # Optionally, fit with default params as a fallback if grid search fails
+                    try:
+                        estimator.fit(X_train_processed_df, y_train)
+                        current_best_estimator_for_model = estimator
+                        y_train_pred_cv = current_best_estimator_for_model.predict(X_train_processed_df)
+                        best_cv_score_for_model = r2_score(y_train, y_train_pred_cv) if len(y_train) > 0 else np.nan
+                        best_params_for_model = {} # No tuned params
+                        print(f"Fitted {model_name} with default params as GridSearchCV fallback.")
+                    except Exception as e_fit_default:
+                        print(f"Fitting {model_name} with default params also failed: {e_fit_default}")
+                        current_best_estimator_for_model = None
+
+
+            else:
                 current_best_estimator_for_model = estimator
                 current_best_estimator_for_model.fit(X_train_processed_df, y_train)
                 y_train_pred_cv = current_best_estimator_for_model.predict(X_train_processed_df)
@@ -317,7 +336,21 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             
             training_time = time.time() - start_time
             
-            if X_test_processed_df.empty:
+            # Ensure current_best_estimator_for_model is not None before proceeding
+            if current_best_estimator_for_model is None:
+                print(f"Skipping evaluation for {model_name} as it failed to train.")
+                # Add a placeholder result or skip adding to all_model_results
+                model_result = {
+                    "Model Type": model_name, "R-squared": np.nan, "MAE": np.nan, "RMSE": np.nan,
+                    "MAPE": np.nan, "Best Hyperparameters": "Training Failed",
+                    "Cross-Validation R2": np.nan, "Training Time (s)": training_time,
+                    "Pipeline": None, 
+                    "Hyperparameter_Definitions": MODEL_EXPLANATIONS.get(model_name, {}).get('hyperparameters', {})
+                }
+                all_model_results.append(model_result)
+                continue # Move to the next model_config
+
+            if X_test_processed_df.empty or y_test.empty:
                 y_pred_on_test = np.array([])
                 r_squared, mae, mse, mape_serializable = np.nan, np.nan, np.nan, np.nan
             else:
@@ -345,26 +378,27 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                 best_r2 = r_squared
                 best_model_info_dict = model_result
                 best_model_pipeline_obj = final_pipeline_for_model
-        
+            
         current_progress_idx_offset = 2 + total_models 
         progress_callback(current_progress_steps, current_progress_idx_offset) 
         
         if best_model_pipeline_obj and not X_train_processed_df.empty and best_model_info_dict: 
             best_regressor = best_model_pipeline_obj.named_steps['regressor']
+            current_model_name_for_plot = best_model_info_dict.get('Model Type', 'N/A')
             
             if X_test_processed_df.empty or y_test.empty or len(y_test) < 2:
-                actual_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Actual vs. Predicted: Test data insufficient")))
+                actual_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Actual vs. Predicted: Test data insufficient (need at least 2 points)")))
                 actual_vs_predicted_fig.add_annotation(text="Not enough test data points to generate this plot.", showarrow=False, font=dict(size=12))
-                residuals_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Residuals vs. Predicted: Test data insufficient")))
+                residuals_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Residuals vs. Predicted: Test data insufficient (need at least 2 points)")))
                 residuals_vs_predicted_fig.add_annotation(text="Not enough test data points to generate this plot.", showarrow=False, font=dict(size=12))
             else:
                 y_pred_best_model_test = best_regressor.predict(X_test_processed_df)
                 try:
-                    min_val = min(y_test.min(), y_pred_best_model_test.min()) if len(y_test) > 0 and len(y_pred_best_model_test) > 0 else 0
-                    max_val = max(y_test.max(), y_pred_best_model_test.max()) if len(y_test) > 0 and len(y_pred_best_model_test) > 0 else 1
+                    min_val = min(y_test.min(), y_pred_best_model_test.min())
+                    max_val = max(y_test.max(), y_pred_best_model_test.max())
                     actual_vs_predicted_fig = px.scatter(x=y_test, y=y_pred_best_model_test, 
                                                          labels={'x': 'Actual Values', 'y': 'Predicted Values'}, 
-                                                         title=f'Actual vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                                                         title=f'Actual vs. Predicted ({current_model_name_for_plot})')
                     actual_vs_predicted_fig.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val], 
                                                                  mode='lines', name='Ideal Fit', line=dict(dash='dash', color='grey')))
                 except Exception as e_avp: 
@@ -372,12 +406,11 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     actual_vs_predicted_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"Actual vs. Predicted plot error: {e_avp}")))
                     actual_vs_predicted_fig.add_annotation(text=f"Error: {e_avp}", showarrow=False, font=dict(size=10))
 
-
                 try:
                     residuals = y_test - y_pred_best_model_test
                     residuals_vs_predicted_fig = px.scatter(x=y_pred_best_model_test, y=residuals, 
                                                             labels={'x': 'Predicted Values', 'y': 'Residuals'}, 
-                                                            title=f'Residuals vs. Predicted ({best_model_info_dict.get("Model Type", "N/A")})')
+                                                            title=f'Residuals vs. Predicted ({current_model_name_for_plot})')
                     residuals_vs_predicted_fig.add_hline(y=0, line_dash="dash", line_color="grey")
                 except Exception as e_resid: 
                     print(f"Error Residuals plot: {e_resid}")
@@ -388,97 +421,159 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             residuals_vs_predicted_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
 
             progress_callback(current_progress_steps, current_progress_idx_offset + 1) 
-            
             shap_values_for_plot = None; X_shap_for_plot = None
-            # SHAP might fail with very small datasets, especially KernelExplainer
-            if X_train_processed_df.shape[0] > max(5, X_train_processed_df.shape[1]): # Heuristic: need more samples than features for SHAP
-                n_shap_samples = min(50, X_train_processed_df.shape[0]) # Reduced samples for SHAP on small data
+            if X_train_processed_df.shape[0] > max(5, X_train_processed_df.shape[1]):
+                n_shap_samples = min(50, X_train_processed_df.shape[0])
                 if n_shap_samples > 0:
                     X_shap_for_plot = shap.sample(X_train_processed_df, n_shap_samples, random_state=42) 
                     explainer = None
                     try:
                         if isinstance(best_regressor, (RandomForestRegressor, GradientBoostingRegressor, DecisionTreeRegressor)): 
                             explainer = shap.TreeExplainer(best_regressor, X_shap_for_plot)
-                        elif X_shap_for_plot.shape[0] > X_shap_for_plot.shape[1] + 2 : # KernelExplainer needs more samples than features
+                        elif X_shap_for_plot.shape[0] > X_shap_for_plot.shape[1] + 2 :
                             explainer = shap.KernelExplainer(best_regressor.predict, X_shap_for_plot) 
                         if explainer: shap_values_for_plot = explainer.shap_values(X_shap_for_plot) 
-                    except Exception as shap_e: print(f"SHAP calculation failed: {shap_e}")
+                    except Exception as shap_e: print(f"SHAP calculation failed for {current_model_name_for_plot}: {shap_e}")
             
             if shap_values_for_plot is not None and X_shap_for_plot is not None and not X_shap_for_plot.empty:
                 try:
                     plt.figure() 
                     shap.summary_plot(shap_values_for_plot, X_shap_for_plot, plot_type="dot", show=False, feature_names=X_train_processed_df.columns.tolist())
                     fig_shap = plt.gcf(); fig_shap.set_size_inches(10, max(6, len(X_train_processed_df.columns) * 0.3)) 
-                    plt.title(f'SHAP Feature Importance ({best_model_info_dict.get("Model Type", "N/A")})', fontsize=12); plt.xlabel("SHAP value (impact on model output)", fontsize=10); plt.tight_layout()
+                    plt.title(f'SHAP Feature Importance ({current_model_name_for_plot})', fontsize=12); plt.xlabel("SHAP value (impact on model output)", fontsize=10); plt.tight_layout()
                     img_buffer_shap = io.BytesIO(); fig_shap.savefig(img_buffer_shap, format="png", bbox_inches="tight"); plt.close(fig_shap)
                     img_buffer_shap.seek(0); img_base64_shap = base64.b64encode(img_buffer_shap.read()).decode()
                     shap_beeswarm_plot_src = f"data:image/png;base64,{img_base64_shap}"
-                except Exception as e_shap_plot: print(f"Error SHAP beeswarm plot: {e_shap_plot}")
-                try:
                     mean_abs_shap = np.abs(shap_values_for_plot).mean(axis=0)
                     importances_df = pd.DataFrame({'feature': X_shap_for_plot.columns, 'importance': mean_abs_shap}).sort_values(by='importance', ascending=False)
-                except Exception as e_imp_df: print(f"Error SHAP importances_df: {e_imp_df}")
+                except Exception as e_shap_plot: 
+                    print(f"Error SHAP beeswarm plot or importance calculation for {current_model_name_for_plot}: {e_shap_plot}")
+                    shap_beeswarm_plot_src = None 
+                    if importances_df.empty: importances_df = pd.DataFrame() # Ensure it's an empty df if SHAP fails here
             
-            # Basic Feature Importance Plot
-            progress_callback(current_progress_steps, current_progress_idx_offset + 2) # Index for "Generating Basic Feature Importances..."
+            progress_callback(current_progress_steps, current_progress_idx_offset + 2) 
             basic_importances_values = None
+            importance_type = "" 
             feature_names_for_importance = X_train_processed_df.columns.tolist()
-            
+
             if hasattr(best_regressor, 'feature_importances_'):
                 basic_importances_values = best_regressor.feature_importances_
+                importance_type = "Feature Importances"
             elif hasattr(best_regressor, 'coef_'):
                 basic_importances_values = best_regressor.coef_
                 if basic_importances_values.ndim > 1: 
-                    basic_importances_values = np.mean(np.abs(basic_importances_values), axis=0) 
-                basic_importances_values = np.abs(basic_importances_values)
+                    basic_importances_values = np.mean(np.abs(basic_importances_values), axis=0)
+                basic_importances_values = np.abs(basic_importances_values) 
+                importance_type = "Coefficients (Absolute Magnitude)"
+            
+            if basic_importances_values is not None:
+                if len(feature_names_for_importance) == len(basic_importances_values):
+                    try:
+                        importance_df_basic_plot = pd.DataFrame({'feature': feature_names_for_importance, 'importance': basic_importances_values})
+                        plot_df_basic = importance_df_basic_plot.copy()
+                        plot_df_basic['abs_importance'] = plot_df_basic['importance'].abs() # Sort by abs for top N
+                        plot_df_basic = plot_df_basic.sort_values(by='abs_importance', ascending=False)
+                        
+                        if len(plot_df_basic) > 15:
+                            plot_df_basic_display = plot_df_basic.head(15)
+                        else:
+                            plot_df_basic_display = plot_df_basic
+                        
+                        # Ensure y-axis is sorted by the original importance value for plotting
+                        plot_df_basic_display = plot_df_basic_display.sort_values(by='importance', ascending=True)
 
-            if basic_importances_values is not None and len(feature_names_for_importance) == len(basic_importances_values):
-                try:
-                    importance_df_basic_plot = pd.DataFrame({'feature': feature_names_for_importance, 'importance': basic_importances_values})
-                    importance_df_basic_plot = importance_df_basic_plot.sort_values(by='importance', ascending=False).head(15)
-                    basic_feature_importance_fig = px.bar(importance_df_basic_plot, x='importance', y='feature', orientation='h',
-                                                       title=f'Basic Feature Importance ({best_model_info_dict.get("Model Type", "N/A")})',
-                                                       labels={'feature': 'Feature (Processed)', 'importance': 'Importance Score'})
-                    basic_feature_importance_fig.update_layout(yaxis={'categoryorder':'total ascending'}, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=max(300, len(importance_df_basic_plot)*30 + 50), title_x=0.5)
-                except Exception as e_bfi:
-                    print(f"Error generating basic feature importance plot: {e_bfi}")
-                    basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"Basic Feature Importance plot error: {e_bfi}")))
-                    basic_feature_importance_fig.add_annotation(text=f"Error: {e_bfi}", showarrow=False, font=dict(size=10))
-            else:
-                 basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text="Basic Feature Importance not available/applicable.")))
-                 basic_feature_importance_fig.add_annotation(text="Model type may not support direct importance scores or feature name mismatch.", showarrow=False, font=dict(size=10))
+
+                        if not plot_df_basic_display.empty:
+                            basic_feature_importance_fig = px.bar(plot_df_basic_display, x='importance', y='feature', orientation='h',
+                                                                title=f"{importance_type} for {current_model_name_for_plot}",
+                                                                labels={'feature': 'Feature (Processed)', 'importance': importance_type})
+                            basic_feature_importance_fig.update_layout(yaxis={'categoryorder':'total ascending'}, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=max(300, len(plot_df_basic_display)*30 + 70), title_x=0.5)
+                            if importances_df.empty: 
+                                importances_df = importance_df_basic_plot[['feature', 'importance']].rename(columns={'importance': 'importance_score'}).sort_values(by='importance_score', ascending=False)
+                        else: 
+                            basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"{importance_type} for {current_model_name_for_plot}: No significant values to plot.")))
+                            basic_feature_importance_fig.add_annotation(text="All feature importances/coefficients might be zero or filtered out.", showarrow=False, font=dict(size=10))
+                    except Exception as e_bfi:
+                        print(f"Error generating basic feature importance plot for {current_model_name_for_plot}: {e_bfi}")
+                        basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"Error generating {importance_type} plot for {current_model_name_for_plot}.")))
+                        basic_feature_importance_fig.add_annotation(text=f"Details: {str(e_bfi)}", showarrow=False, font=dict(size=10))
+                else: 
+                    print(f"Length mismatch for {current_model_name_for_plot}: {len(feature_names_for_importance)} features vs {len(basic_importances_values)} importances.")
+                    basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"{importance_type} for {current_model_name_for_plot}: Feature/Importance Mismatch.")))
+                    basic_feature_importance_fig.add_annotation(text="Could not align feature names with importance values.", showarrow=False, font=dict(size=10))
+            else: 
+                basic_feature_importance_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"Basic Feature Importance / Coefficients not applicable for {current_model_name_for_plot}.")))
+                basic_feature_importance_fig.add_annotation(text="This model type does not have direct feature_importances_ or coef_ attributes.", showarrow=False, font=dict(size=10))
+            
             basic_feature_importance_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', title_x=0.5)
 
+            progress_callback(current_progress_steps, current_progress_idx_offset + 3) 
+            decision_tree_specific_plot_src = None 
+            if isinstance(best_regressor, DecisionTreeRegressor):
+                try:
+                    if best_regressor.tree_.node_count > 1 and X_train_processed_df.shape[0] > 0: 
+                        n_features_dt = best_regressor.n_features_in_
+                        tree_depth_dt = best_regressor.get_depth()
+                        fig_width_dt = min(25, max(10, n_features_dt * 1.0 + tree_depth_dt * 1.5 + 5)) # Dynamic sizing
+                        fig_height_dt = min(20, max(8, tree_depth_dt * 1.2 + 5 ))
+                        font_size_dt = int(min(10, max(5, 60 / (n_features_dt + tree_depth_dt if n_features_dt > 0 and tree_depth_dt > 0 else 10))))
 
-        current_progress_idx_offset = current_progress_steps.index("Calculating SHAP Values for Best Model...") + 2 # after basic importance
+
+                        plt.figure(figsize=(fig_width_dt, fig_height_dt), dpi=120) 
+                        plot_tree(best_regressor, 
+                                  feature_names=feature_names_out, 
+                                  filled=True, 
+                                  rounded=True, 
+                                  fontsize=font_size_dt, 
+                                  max_depth=5, 
+                                  label='all', 
+                                  impurity=False, 
+                                  proportion=True)
+                        plt.title(f"Decision Tree Structure for {current_model_name_for_plot} (Max Depth 5)", fontsize=max(10, font_size_dt + 2))
+                        img_buffer_dt = io.BytesIO()
+                        plt.savefig(img_buffer_dt, format="png", bbox_inches="tight")
+                        plt.close() 
+                        img_buffer_dt.seek(0)
+                        img_base64_dt = base64.b64encode(img_buffer_dt.read()).decode()
+                        decision_tree_specific_plot_src = f"data:image/png;base64,{img_base64_dt}"
+                    else:
+                        print(f"Decision tree for {current_model_name_for_plot} too simple (e.g. root only) or no training data for plotting.")
+                        decision_tree_specific_plot_src = None
+                except Exception as e_dt_plot:
+                    print(f"Error generating specific Decision Tree plot for {current_model_name_for_plot}: {e_dt_plot}\n{traceback.format_exc()}")
+                    decision_tree_specific_plot_src = None
+
+
+        current_progress_idx_offset = current_progress_steps.index("Generating Model-Specific Visualizations...") +1
 
         if analysis_type == 'exploration':
             progress_callback(current_progress_steps, len(current_progress_steps)-1) 
-            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig, basic_feature_importance_fig
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, actual_vs_predicted_fig, residuals_vs_predicted_fig, basic_feature_importance_fig, decision_tree_specific_plot_src
 
         elif analysis_type == 'optimization':
-            # ... (rest of the optimization logic, ensure it uses the updated current_progress_idx_offset)
             opt_progress_start_index = current_progress_steps.index("Generating Surrogate Tree...")
             progress_callback(current_progress_steps, opt_progress_start_index) 
             if not X_train_processed_df.empty and best_model_pipeline_obj:
                 best_regressor_for_surrogate = best_model_pipeline_obj.named_steps['regressor']
                 y_hat_train_surrogate = best_regressor_for_surrogate.predict(X_train_processed_df)
-                interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42)
+                interpretable_tree = DecisionTreeRegressor(max_depth=3, random_state=42) 
                 try:
                     interpretable_tree.fit(X_train_processed_df, y_hat_train_surrogate) 
                     surrogate_tree_text = export_text(interpretable_tree, feature_names=X_train_processed_df.columns.tolist())
                     if interpretable_tree.tree_.node_count > 1: 
-                        font_size_tree = int(min(9, 100/len(X_train_processed_df.columns) if len(X_train_processed_df.columns)>0 else 9))
-                        fig_tree, ax_tree = plt.subplots(figsize=(min(20, 3*len(X_train_processed_df.columns) if len(X_train_processed_df.columns) > 0 else 10),10), dpi=100) 
-                        plot_tree(interpretable_tree, feature_names=X_train_processed_df.columns.tolist(), filled=True, rounded=True, fontsize=font_size_tree, ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
-                        plt.title("Surrogate Decision Tree (Approximating Best Model's Logic)", fontsize=12); img_buffer = io.BytesIO(); fig_tree.savefig(img_buffer, format="png", bbox_inches="tight"); plt.close(fig_tree)
+                        font_size_tree_surr = int(min(9, 100/len(X_train_processed_df.columns) if len(X_train_processed_df.columns)>0 else 9))
+                        fig_tree_surr_width = min(20, 3 * len(X_train_processed_df.columns) if len(X_train_processed_df.columns) > 0 else 10)
+                        fig_tree_surr_height = 10
+                        fig_tree, ax_tree = plt.subplots(figsize=(fig_tree_surr_width, fig_tree_surr_height), dpi=100) 
+                        plot_tree(interpretable_tree, feature_names=X_train_processed_df.columns.tolist(), filled=True, rounded=True, fontsize=font_size_tree_surr, ax=ax_tree, max_depth=3, label='all', impurity=False, proportion=True)
+                        plt.title("Surrogate Decision Tree (Approximating Best Model's Logic, Max Depth 3)", fontsize=12); img_buffer = io.BytesIO(); fig_tree.savefig(img_buffer, format="png", bbox_inches="tight"); plt.close(fig_tree)
                         img_buffer.seek(0); img_base64 = base64.b64encode(img_buffer.read()).decode(); surrogate_tree_plot_src = f"data:image/png;base64,{img_base64}"
                     else:
-                        surrogate_tree_text = "Surrogate tree is too simple to visualize (e.g., only a root node). This can happen if the model's predictions are nearly constant or no meaningful splits are found at max_depth=3."
+                        surrogate_tree_text = "Simplified surrogate tree is too simple to visualize (e.g., only a root node)."
                         surrogate_tree_plot_src = None
                 except Exception as e_tree_plot: 
-                    print(f"Error surrogate tree plot: {e_tree_plot}")
-                    surrogate_tree_text = f"Error generating surrogate tree visual: {str(e_tree_plot)}. Textual representation may still be available."
+                    print(f"Error simplified surrogate tree plot: {e_tree_plot}")
+                    surrogate_tree_text = f"Error generating simplified surrogate tree visual: {str(e_tree_plot)}."
                     surrogate_tree_plot_src = None 
             
             progress_callback(current_progress_steps, opt_progress_start_index + 1) 
@@ -501,15 +596,15 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
 
 
             grid_points_num_orig = {col: np.linspace(opt_feature_ranges[col]['min'], opt_feature_ranges[col]['max'], 7) 
-                                    for col in numerical_features if col in opt_feature_ranges and opt_feature_ranges[col]['min'] != opt_feature_ranges[col]['max']}
+                                     for col in numerical_features if col in opt_feature_ranges and opt_feature_ranges[col]['min'] != opt_feature_ranges[col]['max']}
             grid_points_cat_orig = {col: data_df[col].unique().tolist() for col in categorical_features}
             iterables_for_product_orig = []
             for col in feature_columns:
                 if col in grid_points_num_orig: iterables_for_product_orig.append((col, grid_points_num_orig[col]))
                 elif col in grid_points_cat_orig: iterables_for_product_orig.append((col, grid_points_cat_orig[col]))
-                elif col in numerical_features: iterables_for_product_orig.append((col, [data_df[col].mean() if not data_df[col].empty else 0])) # handle empty series
+                elif col in numerical_features: iterables_for_product_orig.append((col, [data_df[col].mean() if not data_df[col].empty else 0]))
                 elif col in categorical_features and not data_df[col].mode().empty: iterables_for_product_orig.append((col, [data_df[col].mode()[0]]))
-                else: iterables_for_product_orig.append((col, [None])) # Fallback for unhandled cases
+                else: iterables_for_product_orig.append((col, [None]))
             
             current_iterables_values_orig = [item[1] for item in iterables_for_product_orig]; current_feature_names_ordered_orig = [item[0] for item in iterables_for_product_orig]
             all_combinations_list_orig = [dict(zip(current_feature_names_ordered_orig, combo_values_orig)) for combo_values_orig in product(*current_iterables_values_orig)]
@@ -519,7 +614,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                  all_combinations_list_orig.append(default_row)
 
             if all_combinations_list_orig:
-                optimization_df_orig_features = pd.DataFrame(all_combinations_list_orig, columns=feature_columns).fillna(0) # fillna for safety
+                optimization_df_orig_features = pd.DataFrame(all_combinations_list_orig, columns=feature_columns).fillna(0)
                 try:
                     optimization_df_processed = base_preprocessor.transform(optimization_df_orig_features)
                     optimization_df_processed = pd.DataFrame(optimization_df_processed, columns=feature_names_out)
@@ -528,7 +623,7 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
                     optimal_idx = np.argmax(optimization_predictions) if optimization_goal == 'maximize' else np.argmin(optimization_predictions)
                     optimal_settings = optimization_df_orig_features.iloc[optimal_idx].to_dict()
                     predicted_target = optimization_predictions[optimal_idx]
-                    if not X_test_processed_df.empty:
+                    if not X_test_processed_df.empty and len(y_test) >=2 : 
                         test_predictions_for_std = best_regressor_for_opt.predict(X_test_processed_df)
                         prediction_std = np.std(test_predictions_for_std) if len(test_predictions_for_std) > 1 else 0
                         predicted_target_lower = predicted_target - 1.96 * prediction_std; predicted_target_upper = predicted_target + 1.96 * prediction_std
@@ -590,23 +685,22 @@ def run_automl_pipeline(data_df, target_column, feature_columns, missing_value_s
             return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, \
                    optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
                    response_surface_fig, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
-                   actual_vs_predicted_fig, residuals_vs_predicted_fig, basic_feature_importance_fig
+                   actual_vs_predicted_fig, residuals_vs_predicted_fig, basic_feature_importance_fig, decision_tree_specific_plot_src 
         
     except Exception as main_pipeline_error:
         print(f"CRITICAL ERROR in AutoML pipeline: {main_pipeline_error}\n{traceback.format_exc()}")
-        # Ensure all return values are provided even in case of error
         error_fig = go.Figure(layout=go.Layout(title=go.layout.Title(text=f"Pipeline Error: {main_pipeline_error}")))
         error_fig.add_annotation(text=f"Error: {main_pipeline_error}", showarrow=False, font=dict(size=10))
         error_fig.update_layout(paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', height=400, title_x=0.5)
 
         progress_callback(current_progress_steps, len(current_progress_steps) -1) 
         if analysis_type == 'exploration':
-            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, error_fig, error_fig, error_fig
+            return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, error_fig, error_fig, error_fig, None 
         elif analysis_type == 'optimization':
             return all_model_results, best_model_info_dict, importances_df, shap_beeswarm_plot_src, current_progress_steps, \
                    optimal_settings, predicted_target, predicted_target_lower, predicted_target_upper, \
                    {}, surrogate_tree_text, model_info_summary, surrogate_tree_plot_src, \
-                   error_fig, error_fig, error_fig
+                   error_fig, error_fig, error_fig, None 
         else: 
             raise main_pipeline_error
 
@@ -616,8 +710,8 @@ def run_exploration_automl(data_df, target_column, feature_columns, missing_valu
 
 def run_optimization_automl(data_df, target_column, feature_columns, optimization_goal, feature_ranges, missing_value_strategy, progress_callback):
     return run_automl_pipeline(data_df, target_column, feature_columns, missing_value_strategy,
-                                   progress_callback, 'optimization',
-                                   optimization_goal=optimization_goal, feature_ranges_from_ui=feature_ranges) # Pass feature_ranges as feature_ranges_from_ui
+                                       progress_callback, 'optimization',
+                                       optimization_goal=optimization_goal, feature_ranges_from_ui=feature_ranges)
 
 
 def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition=""):
@@ -654,12 +748,12 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
     For a scientist audience (e.g., synthetic biology, protein engineering), explain:
     1.  The overall objective and methodology of this '{analysis_type}' analysis.
     2.  The significance of the best model ('{best_model_name}') chosen and its performance metrics (R-squared, MAE, RMSE, MAPE). Interpret what these metrics mean in practical terms for this experiment.
-    3.  Detailed insights from the SHAP feature importance analysis (if available and successful) OR the Basic Feature Importance plot. Explain what these plots reveal about the top features. How do these features influence the target variable? If SHAP failed due to small data, mention this and focus on the basic importance.
+    3.  Detailed insights from the SHAP feature importance analysis (if available and successful) OR the Basic Feature Importance/Coefficients plot. If the best model was a Decision Tree, also comment on its structure if a plot is available. Explain what these plots reveal about the top features. How do these features influence the target variable? If SHAP failed due to small data, mention this and focus on the basic importance and any model-specific plots.
     4.  Guidance on interpreting the 'Actual vs. Predicted' and 'Residuals vs. Predicted' plots. What should a scientist look for in these plots to assess model performance and trustworthiness? Mention if these plots could not be generated due to insufficient test data.
     5.  If '{analysis_type}' is 'Optimization':
         a.  Explain the role of the surrogate model ('{best_model_name}') in the optimization process.
         b.  Interpret the suggested optimal settings and the predicted target value at these settings, including any confidence intervals. The optimal settings are derived from the surrogate model's predictions over an extended grid which may include extrapolated values (e.g., +/- 10% beyond original data range for numerical features).
-        c.  Explain how the surrogate decision tree (if provided, or its textual representation) and response surface plots help in understanding the optimization landscape. Clarify that the visual tree might not always be generated due to complexity or data characteristics (e.g., a very simple tree with few splits, or rendering issues with many features), in which case the textual rules are provided as an alternative.
+        c.  Explain how the surrogate decision tree (if provided, or its textual representation) and response surface plots help in understanding the optimization landscape. Clarify that the visual tree might not always be generated due to complexity or data characteristics (e.g., a very simple tree with few splits, or rendering issues with many features), in which case the textual rules are provided as an alternative. If the surrogate was a Decision Tree, comment on its specific plot if available.
     6.  Provide clear, actionable insights and next steps for the scientist based on these results. What should they investigate further or try in the lab?
 
     Focus on clarity, practical implications, and scientific relevance.
@@ -672,12 +766,13 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
         binfo = results_data.get('best_model_info', {})
         bname = binfo.get('Model Type', 'N/A')
         bprops = MODEL_EXPLANATIONS.get(bname, {})
-        imp_df = pd.DataFrame(results_data.get('importances', [])) # This is SHAP importances
-        top_feats = ", ".join(imp_df.head(3)['feature'].tolist()) if not imp_df.empty else "Not available from SHAP"
+        imp_df = pd.DataFrame(results_data.get('importances', [])) 
+        top_feats = ", ".join(imp_df.head(3)['feature'].tolist()) if not imp_df.empty else "Not available from SHAP/Basic Importance"
         r2, mae, rmse, mape = binfo.get('R-squared',0), binfo.get('MAE',0), binfo.get('RMSE',0), binfo.get('MAPE')
         
         shap_available = bool(results_data.get('shap_beeswarm_plot_src'))
         basic_importance_available = bool(results_data.get('basic_feature_importance_fig') and results_data.get('basic_feature_importance_fig',{}).get('data'))
+        dt_plot_available = bool(results_data.get('decision_tree_specific_plot_src'))
 
 
         importance_explanation = f"""
@@ -688,13 +783,18 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
             importance_explanation += f"""
         * **SHAP Analysis:** The SHAP (SHapley Additive exPlanations) analysis provides a sophisticated view of feature importance. The beeswarm plot (if generated) shows feature importance, impact direction, and magnitude. Based on this, the most critical factors influencing '{results_data.get('target_column', 'N/A')}' appear to be: **{top_feats}**.
         """
-        elif basic_importance_available:
+        elif basic_importance_available: 
              importance_explanation += f"""
-        * **Basic Feature Importance:** SHAP analysis might have been inconclusive (often due to small data size). However, a basic feature importance plot was generated from the best model's internal metrics (like feature_importances_ or coefficients). This plot provides a simpler view of which (processed) features the model found most predictive. Refer to this plot for insights.
+        * **Basic Feature Importance / Coefficients:** SHAP analysis might have been inconclusive (often due to small data size). However, a basic feature importance plot was generated from the best model's ('{bname}') internal metrics (like feature_importances_ for tree models or coefficients for linear models). This plot provides a simpler view of which (processed) features the model found most predictive. These appear to be: **{top_feats}**. Refer to this plot for insights.
         """
-        else:
+        else: 
             importance_explanation += f"""
-        * **Feature Importance:** Neither SHAP nor basic feature importance plots could be reliably generated, likely due to the very small dataset size or model characteristics.
+        * **Feature Importance:** Neither SHAP nor basic feature importance plots could be reliably generated for the '{bname}' model, likely due to the very small dataset size or model characteristics.
+        """
+        
+        if dt_plot_available and bname == "DecisionTreeRegressor":
+            importance_explanation += f"""
+        * **Decision Tree Structure:** Since the best model is a Decision Tree, a plot of its structure (pruned to max_depth=5 for readability) has been generated. This visual shows the exact decision rules (based on processed features) the model learned to make predictions. This offers a very transparent view of the model's logic.
         """
 
 
@@ -720,15 +820,15 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
 
         **Actionable Scientific Insights & Next Steps:**
         1.  **Validate Model Performance:** Given the dataset size, critically assess the R² value. If it's low, the model may not be reliable.
-        2.  **Focus on Key Features (if available):** If feature importance was determined, these variables warrant attention.
-        3.  **Consider Data Augmentation:** For very small datasets, model reliability is a major concern. Consider if more data can be collected.
+        2.  **Focus on Key Features (if available):** If feature importance was determined (via SHAP, basic importance, or Decision Tree structure), these variables warrant primary attention in future experiments.
+        3.  **Consider Data Augmentation:** For very small datasets, model reliability is a major concern. Consider if more data can be collected, focusing on varying the identified key features.
         4.  **Model Limitations:** All models are simplifications. Unexplained variance (1 - R²) might be due to unmeasured factors or inherent randomness.
         {custom_prompt_addition}
         """
 
     elif analysis_type == "Optimization":
         s_info = results_data.get('model_info', {}) 
-        s_name = s_info.get('Model Type', 'N/A')
+        s_name = s_info.get('Model Type', 'N/A') 
         s_props = MODEL_EXPLANATIONS.get(s_name, {})
         s_perf = results_data.get('best_model_info', {}) 
         s_r2 = s_perf.get('R-squared', 0.0)
@@ -738,36 +838,44 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
         goal_v = "maximize" if results_data.get('goal') == "maximize" else "minimize"
         pred_val, pred_low, pred_upp = results_data.get('predicted_target', np.nan), results_data.get('predicted_target_lower', np.nan), results_data.get('predicted_target_upper', np.nan)
         
-        imp_opt_df = pd.DataFrame(results_data.get('importances', [])) # SHAP importances
-        top_shap_opt = ", ".join(imp_opt_df.head(3)['feature'].tolist()) if not imp_opt_df.empty else "N/A from SHAP"
+        imp_opt_df = pd.DataFrame(results_data.get('importances', [])) 
+        top_shap_opt = ", ".join(imp_opt_df.head(3)['feature'].tolist()) if not imp_opt_df.empty else "N/A from SHAP/Basic Importance"
         
         shap_available_opt = bool(results_data.get('shap_beeswarm_plot_src_opt'))
         basic_importance_available_opt = bool(results_data.get('basic_feature_importance_fig_opt') and results_data.get('basic_feature_importance_fig_opt',{}).get('data'))
+        dt_plot_available_surrogate = bool(results_data.get('decision_tree_specific_plot_src')) and s_name == "DecisionTreeRegressor"
+
 
         importance_explanation_opt = f"""
-        * **Surrogate Model Feature Importance:**
+        * **Surrogate Model ({s_name}) Feature Importance:**
         """
         if shap_available_opt:
             importance_explanation_opt += f""" The SHAP beeswarm plot for the surrogate model indicates that **{top_shap_opt}** were key drivers of its predictions.
         """
         elif basic_importance_available_opt:
-            importance_explanation_opt += f""" A basic feature importance plot for the surrogate model was generated. Refer to this plot to understand which (processed) features most influenced its predictions.
+            importance_explanation_opt += f""" A basic feature importance / coefficients plot for the surrogate model ('{s_name}') was generated. It suggests **{top_shap_opt}** as key drivers. Refer to this plot to understand which (processed) features most influenced its predictions.
         """
         else:
-            importance_explanation_opt += f""" Feature importance for the surrogate model could not be reliably determined.
+            importance_explanation_opt += f""" Feature importance for the surrogate model ('{s_name}') could not be reliably determined via SHAP or basic methods.
+        """
+        
+        if dt_plot_available_surrogate:
+             importance_explanation_opt += f"""
+        * **Surrogate Decision Tree Structure:** Since the surrogate model is a Decision Tree, a plot of its structure (pruned to max_depth=5 for readability) is available. This shows the rules it learned.
         """
 
 
-        surrogate_tree_explanation = "The visual surrogate decision tree (if provided) offers a simplified approximation of the model's logic. "
+        surrogate_tree_explanation = "The separate 'Surrogate Decision Tree (Approximating Best Model's Logic)' plot (if provided) offers a simplified, interpretable version (max_depth=3) of the chosen surrogate model's predictions. "
         if not results_data.get('surrogate_tree_plot_src') and results_data.get('surrogate_tree_text', ''): 
-            if results_data.get('surrogate_tree_text', '').startswith('|-') or "Surrogate tree is too simple to visualize" in results_data.get('surrogate_tree_text', ''):
-                 surrogate_tree_explanation += "In this case, a visual plot could not be generated (often due to tree complexity with many features or very simple tree structures after pruning to max_depth=3). Instead, the textual representation of the tree's rules is provided, showing key decision paths based on (transformed) feature values."
+            if "Surrogate tree is too simple to visualize" in results_data.get('surrogate_tree_text', '') or results_data.get('surrogate_tree_text', '').startswith('Error generating simplified surrogate tree visual'):
+                 surrogate_tree_explanation += "In this case, a visual plot of this simplified tree could not be generated. Instead, the textual representation of its rules (or an error message if generation failed) is provided."
             else: 
-                 surrogate_tree_explanation += "The surrogate tree information was not successfully generated for this run. The textual output may contain an error message or indicate it was not applicable."
+                 surrogate_tree_explanation += "The simplified surrogate tree information was not successfully generated. The textual output may contain an error message."
+
         elif results_data.get('surrogate_tree_plot_src'):
              surrogate_tree_explanation += "It highlights key decision paths based on (transformed) feature values."
         else: 
-            surrogate_tree_explanation += "The surrogate tree was not generated or available for this run."
+            surrogate_tree_explanation += "The simplified surrogate tree visualization was not generated."
 
 
         return f"""
@@ -784,7 +892,7 @@ def generate_explanation_llm(analysis_type, results_data, custom_prompt_addition
         **Interpreting Surrogate Model Insights & Visualizations:**
         * **Surrogate Model ({s_name}):** Its performance (Actual vs. Predicted, Residuals plots shown for its evaluation run) gives confidence in its ability to guide the optimization. If these plots indicate insufficient test data, interpret with caution.
         {importance_explanation_opt}
-        * **Surrogate Decision Tree:** {surrogate_tree_explanation}
+        * **Simplified Surrogate Decision Tree:** {surrogate_tree_explanation}
         * **Response Surface Plot:** This plot (if applicable, for 1 or 2 varied numerical inputs) visually maps how the predicted target changes as key inputs are varied, helping to understand the sensitivity and landscape around the optimum.
 
         **Actionable Scientific Insights & Next Steps:**
@@ -845,7 +953,6 @@ def process_dataframe_for_ui(df, filename_display):
     ])
     status_message = dbc.Alert(f"Loaded: {filename_display}. Displaying first {len(display_df)} of {len(df)} rows.", color="success", duration=4000) if len(df) > 50 else dbc.Alert(f"Loaded: {filename_display}", color="success", duration=4000)
     stored_data = df.to_json(date_format='iso', orient='split')
-    # Placeholder for initial data exploration plots
     data_exploration_plots_div = html.Div(id='data-exploration-plots-div', className="mt-4")
     return status_message, table, stored_data, role_assignment_ui, data_exploration_plots_div
 
@@ -874,7 +981,6 @@ app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children
     dbc.Row(dbc.Col(html.P("Powered by AutoML and Generative AI", className="text-center text-muted mt-5 small"), width=12))
 ])
 
-# Callback to update data exploration scatter plots on Tab 1
 @app.callback(
     Output('data-exploration-plots-div', 'children'),
     [Input('dropdown-input-vars', 'value'),
@@ -883,39 +989,76 @@ app.layout = dbc.Container(fluid=True, className="bg-light min-vh-100", children
 )
 def update_data_exploration_plots(selected_inputs, selected_output, raw_data_json):
     if not selected_inputs or not selected_output or not raw_data_json:
-        return html.P("Select input features and an output variable to see scatter plots.", className="text-muted small")
+        return html.P("Select input features and an output variable to see initial exploration plots.", className="text-muted small")
 
     try:
         df = pd.read_json(raw_data_json, orient='split')
         if df.empty:
             return html.P("No data available for plotting.", className="text-muted small")
 
-        plots = []
+        plot_children = [] 
+
+        numerical_cols_for_corr = [col for col in selected_inputs if pd.api.types.is_numeric_dtype(df[col])]
+        if selected_output and pd.api.types.is_numeric_dtype(df[selected_output]):
+            if selected_output not in numerical_cols_for_corr: 
+                numerical_cols_for_corr.append(selected_output)
+        
+        if len(numerical_cols_for_corr) >= 2:
+            try:
+                corr_matrix = df[numerical_cols_for_corr].corr()
+                heatmap_fig = px.imshow(corr_matrix,
+                                        text_auto=True, 
+                                        aspect="auto", 
+                                        color_continuous_scale='RdBu_r', 
+                                        zmin=-1, zmax=1, 
+                                        title="Correlation Heatmap of Numerical Features & Target")
+                heatmap_fig.update_layout(height=max(400, len(numerical_cols_for_corr) * 40), title_x=0.5, 
+                                          paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(248,249,250,0.8)')
+                heatmap_fig.update_xaxes(tickangle=45) 
+                plot_children.append(dbc.Row(dbc.Col(dcc.Graph(figure=heatmap_fig, id="correlation-heatmap-graph"), width=12), className="mb-3"))
+            except Exception as e_heatmap:
+                print(f"Error generating heatmap: {e_heatmap}")
+                plot_children.append(dbc.Row(dbc.Col(dbc.Alert(f"Could not generate correlation heatmap: {e_heatmap}", color="warning"),width=12), className="mb-3"))
+        elif len(numerical_cols_for_corr) < 2 :
+             plot_children.append(dbc.Row(dbc.Col(html.P("Select at least two numerical features (or one numerical feature and a numerical target) to generate a correlation heatmap.", className="text-muted small border p-3 rounded bg-light"), width=12), className="mb-3"))
+
+        scatter_box_plots = []
         for input_col in selected_inputs:
             if input_col in df.columns and selected_output in df.columns:
-                # Check if both columns are numeric for scatter plot with trendline
-                if pd.api.types.is_numeric_dtype(df[input_col]) and pd.api.types.is_numeric_dtype(df[selected_output]):
-                    if df[[input_col, selected_output]].dropna().shape[0] >= 2: # Need at least 2 points for trendline
-                        fig = px.scatter(df, x=input_col, y=selected_output, 
-                                         title=f'{selected_output} vs. {input_col}', 
-                                         trendline="ols", trendline_color_override="red")
-                        fig.update_layout(height=350, title_x=0.5, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(248,249,250,0.8)')
-                        plots.append(dbc.Col(dcc.Graph(figure=fig), md=6, className="mb-3"))
-                    else:
-                        plots.append(dbc.Col(html.P(f"Not enough data points for a trendline between {input_col} and {selected_output}.", className="text-muted small border p-3 rounded bg-light"), md=6, className="mb-3"))
-                elif pd.api.types.is_numeric_dtype(df[selected_output]): # If target is numeric but input might be categorical
-                    fig = px.box(df, x=input_col, y=selected_output, title=f'{selected_output} vs. {input_col} (Box Plot)')
-                    fig.update_layout(height=350, title_x=0.5, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(248,249,250,0.8)')
-                    plots.append(dbc.Col(dcc.Graph(figure=fig), md=6, className="mb-3"))
-                else: # Fallback if types are not ideal for scatter/box
-                     plots.append(dbc.Col(html.P(f"Cannot generate standard plot for {input_col} vs {selected_output} due to data types.", className="text-muted small border p-3 rounded bg-light"), md=6, className="mb-3"))
+                fig = None
+                plot_title = f'{selected_output} vs. {input_col}'
+                try:
+                    if pd.api.types.is_numeric_dtype(df[input_col]) and pd.api.types.is_numeric_dtype(df[selected_output]):
+                        if df[[input_col, selected_output]].dropna().shape[0] >= 2:
+                            fig = px.scatter(df, x=input_col, y=selected_output, 
+                                             title=plot_title, 
+                                             trendline="ols", trendline_color_override="red")
+                        else:
+                            scatter_box_plots.append(dbc.Row(dbc.Col(html.P(f"Not enough data points for a trendline between {input_col} and {selected_output}.", className="text-muted small border p-3 rounded bg-light"), width=12), className="mb-3"))
+                    elif pd.api.types.is_numeric_dtype(df[selected_output]): 
+                        fig = px.box(df, x=input_col, y=selected_output, title=f'{plot_title} (Box Plot)')
+                    else: 
+                         scatter_box_plots.append(dbc.Row(dbc.Col(html.P(f"Cannot generate standard plot for {input_col} vs {selected_output} due to data types.", className="text-muted small border p-3 rounded bg-light"), width=12), className="mb-3"))
+                    
+                    if fig:
+                        fig.update_layout(height=400, title_x=0.5, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(248,249,250,0.8)')
+                        scatter_box_plots.append(dbc.Row(dbc.Col(dcc.Graph(figure=fig), width=12), className="mb-3"))
+                except Exception as e_scatter_box:
+                    print(f"Error generating scatter/box plot for {input_col} vs {selected_output}: {e_scatter_box}")
+                    scatter_box_plots.append(dbc.Row(dbc.Col(dbc.Alert(f"Could not generate plot for {input_col} vs {selected_output}: {e_scatter_box}",color="warning"),width=12), className="mb-3"))
 
-        if not plots:
-            return html.P("No valid feature pairs selected for plotting or data types are unsuitable.", className="text-muted small")
         
-        return dbc.Row(plots)
+        plot_children.extend(scatter_box_plots)
+
+        if not plot_children: 
+            return html.P("No valid feature pairs or numerical data selected for plotting.", className="text-muted small")
+        
+        return plot_children 
+        
     except Exception as e:
-        print(f"Error generating data exploration plots: {e}")
+        print(f"Error generating data exploration plots: {e}\n{traceback.format_exc()}")
+        if "No module named 'statsmodels'" in str(e):
+             return dbc.Alert(f"Error generating exploration plots: {str(e)}. Please ensure 'statsmodels' is installed (`pip install statsmodels`).", color="warning")
         return dbc.Alert(f"Error generating exploration plots: {str(e)}", color="warning")
 
 
@@ -929,32 +1072,36 @@ def update_data_exploration_plots(selected_inputs, selected_output, raw_data_jso
     State('store-optimization-results', 'data'),
 )
 def render_tab_content(active_tab, raw_data_json, column_roles, analysis_type, exploration_data, optimization_data):
-    data_setup_content = dbc.Card(dbc.CardBody([dbc.Row([
-        dbc.Col([
-            html.H4(children=[html.I(className="fas fa-upload me-2"), "Upload Experiment Data"], className="mb-3 text-secondary"),
-            dcc.Upload(id='upload-data', children=html.Div(['Drag & Drop or ', html.A('Select Files')]), style={'width': '100%', 'height': '80px', 'lineHeight': '80px', 'borderWidth': '2px', 'borderStyle': 'dashed', 'borderRadius': '8px', 'textAlign': 'center', 'margin': '10px 0', 'backgroundColor': '#f8f9fa', 'borderColor': '#adb5bd'}, multiple=False, className="mb-2"),
-            html.Div("Or", className="text-center my-2 small text-muted"),
-            dbc.Button(children=[html.I(className="fas fa-database me-2"),"Load Demo Data"], id="btn-load-demo", color="info", outline=True, className="w-100 mb-3"),
-            html.Div(id='output-data-upload-status', className="mt-2"),
-            html.Div(id='output-datatable-div', className="mt-3", style={'maxHeight': '350px', 'overflowY': 'auto', 'overflowX': 'auto', 'border': '1px solid #dee2e6', 'borderRadius': '5px'})
-        ], md=7, className="p-3 border-end"),
-        dbc.Col([
-            html.H4(children=[html.I(className="fas fa-sliders-h me-2"), "Experiment Configuration"], className="mb-3 text-secondary"),
-            dbc.Label("Experiment Type:", html_for='dropdown-experiment-type', className="fw-bold"),
-            dcc.Dropdown(id='dropdown-experiment-type',
-                         options=[
-                             {'label': 'Exploration (Identify Key Factors)', 'value': 'exploration'},
-                             {'label': 'Optimization (Find Best Settings)', 'value': 'optimization'}
-                         ],
-                         value='exploration', clearable=False, className="mb-3"),
-            html.Div(id='column-role-assignment-div'),
-            html.Div(id='data-exploration-plots-container', className="mt-4") 
-        ], md=5, className="p-3")])]))
+    data_setup_content = dbc.Card(dbc.CardBody([
+        dbc.Row([ 
+            dbc.Col([ 
+                html.H4(children=[html.I(className="fas fa-upload me-2"), "Upload Experiment Data"], className="mb-3 text-secondary"),
+                dcc.Upload(id='upload-data', children=html.Div(['Drag & Drop or ', html.A('Select Files')]), style={'width': '100%', 'height': '80px', 'lineHeight': '80px', 'borderWidth': '2px', 'borderStyle': 'dashed', 'borderRadius': '8px', 'textAlign': 'center', 'margin': '10px 0', 'backgroundColor': '#f8f9fa', 'borderColor': '#adb5bd'}, multiple=False, className="mb-2"),
+                html.Div("Or", className="text-center my-2 small text-muted"),
+                dbc.Button(children=[html.I(className="fas fa-database me-2"),"Load Demo Data"], id="btn-load-demo", color="info", outline=True, className="w-100 mb-3"),
+                html.Div(id='output-data-upload-status', className="mt-2"),
+                html.Div(id='output-datatable-div', className="mt-3", style={'maxHeight': '350px', 'overflowY': 'auto', 'overflowX': 'auto', 'border': '1px solid #dee2e6', 'borderRadius': '5px'})
+            ], md=7, className="p-3 border-end"), 
+            dbc.Col([ 
+                html.H4(children=[html.I(className="fas fa-sliders-h me-2"), "Experiment Configuration"], className="mb-3 text-secondary"),
+                dbc.Label("Experiment Type:", html_for='dropdown-experiment-type', className="fw-bold"),
+                dcc.Dropdown(id='dropdown-experiment-type',
+                             options=[
+                                 {'label': 'Exploration (Identify Key Factors)', 'value': 'exploration'},
+                                 {'label': 'Optimization (Find Best Settings)', 'value': 'optimization'}
+                             ],
+                             value='exploration', clearable=False, className="mb-3"),
+                html.Div(id='column-role-assignment-div'), 
+            ], md=5, className="p-3") 
+        ]),
+        dbc.Row([ 
+            dbc.Col([
+                html.Div(id='data-exploration-plots-container', className="mt-4") 
+            ], width=12) 
+        ])
+    ]))
 
     if active_tab == 'tab-data-upload':
-        # The data_exploration_plots-container is already part of data_setup_content.
-        # Its children will be populated by the handle_data_input and update_data_exploration_plots callbacks.
-        # No need to append 'data-exploration-plots-div' here.
         return data_setup_content
     elif active_tab == 'tab-analysis':
         return render_analysis_tab_content(active_tab, analysis_type, column_roles, raw_data_json)
@@ -1058,18 +1205,18 @@ def handle_data_input(contents, n_clicks_demo, filename):
     df, filename_display = None, None
     if triggered_id == 'upload-data' and contents:
         df_or_error = parse_contents(contents, filename)
-        if isinstance(df_or_error, html.Div): return dbc.Alert(df_or_error.children[0], color="danger", duration=4000), "", None, "", None
+        if isinstance(df_or_error, html.Div): return dbc.Alert(df_or_error.children[0], color="danger", duration=4000), "", None, "", html.Div(id='data-exploration-plots-div') 
         df, filename_display = df_or_error, filename
     elif triggered_id == 'btn-load-demo' and n_clicks_demo:
         try:
             df = pd.read_csv(io.StringIO(DEMO_DATA_CSV_STRING))
             filename_display = "lfa_random_data.csv (Demo)"
-        except Exception as e: return dbc.Alert(f"Error loading demo data: {e}", color="danger", duration=4000), "", None, "", None
+        except Exception as e: return dbc.Alert(f"Error loading demo data: {e}", color="danger", duration=4000), "", None, "", html.Div(id='data-exploration-plots-div')
     
     if df is None: return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
     
-    status_message, table, stored_data, role_assignment_ui, data_exploration_plots_div = process_dataframe_for_ui(df, filename_display)
-    return status_message, table, stored_data, role_assignment_ui, data_exploration_plots_div
+    status_message, table, stored_data, role_assignment_ui, _ = process_dataframe_for_ui(df, filename_display)
+    return status_message, table, stored_data, role_assignment_ui, html.Div(id='data-exploration-plots-div', className="mt-4")
 
 
 @app.callback(
@@ -1184,7 +1331,7 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
     initial_progress_steps = [f"Validating Inputs & Data..."]
     initial_progress_steps.append(f"Preprocessing Data...")
     initial_progress_steps.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
-    initial_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances...", "Finalizing Results..."])
+    initial_progress_steps.extend(["Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances...", "Generating Model-Specific Visualizations...", "Finalizing Results..."])
     
     _captured_progress_steps_list = list(initial_progress_steps) 
     _captured_current_idx = 0
@@ -1210,7 +1357,8 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
 
     try:
         all_model_results, best_model_info_dict, importances, shap_beeswarm_plot_src, \
-        final_progress_steps_from_pipeline, actual_vs_pred_fig, resid_fig, basic_feat_imp_fig = \
+        final_progress_steps_from_pipeline, actual_vs_pred_fig, resid_fig, basic_feat_imp_fig, \
+        decision_tree_specific_plot_src = \
             run_exploration_automl(df, target_column, feature_columns, missing_strategy, _progress_updater_local)
         
         _captured_progress_steps_list = list(final_progress_steps_from_pipeline)
@@ -1261,7 +1409,7 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model R²", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('R-squared', np.nan):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
         dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model MAE", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('MAE', np.nan):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
         dbc.Col(dbc.Card(dbc.CardBody([html.H5("Best Model RMSE", className="card-title text-muted small"), html.P(f"{best_model_info_dict.get('RMSE', np.nan):.3f}", className="card-text fs-4 text-info fw-bold")])), md=3, className="mb-2"),
-        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Top Feature (SHAP)", className="card-title text-muted small"), html.P(f"{importances['feature'].iloc[0] if not importances.empty else 'N/A'}", className="card-text fs-5 text-info fw-bold text-truncate")])), md=3, className="mb-2")
+        dbc.Col(dbc.Card(dbc.CardBody([html.H5("Top Feature", className="card-title text-muted small"), html.P(f"{importances['feature'].iloc[0] if not importances.empty else 'N/A'}", className="card-text fs-5 text-info fw-bold text-truncate")])), md=3, className="mb-2") 
     ], className="mb-3 g-3")
 
     comparison_table_data = []
@@ -1291,17 +1439,40 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
                              ]),
     ], className="mb-4")
     
+    plot_displays = []
+    if actual_vs_pred_fig and actual_vs_pred_fig.data : 
+         plot_displays.append(dbc.Col(dcc.Graph(id='actual-vs-predicted-plot', figure=actual_vs_pred_fig), md=6))
+    else:
+        plot_displays.append(dbc.Col(dbc.Alert("Actual vs. Predicted plot: Test data insufficient (need at least 2 points) or error during generation.", color="warning", className="h-100 d-flex align-items-center justify-content-center"), md=6))
+
+    if resid_fig and resid_fig.data:
+        plot_displays.append(dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot', figure=resid_fig), md=6))
+    else:
+        plot_displays.append(dbc.Col(dbc.Alert("Residuals vs. Predicted plot: Test data insufficient (need at least 2 points) or error during generation.", color="warning", className="h-100 d-flex align-items-center justify-content-center"), md=6))
+    
+    diagnostic_plots_row = dbc.Row(plot_displays, className="mb-4")
+
     shap_plot_display = html.Div([
         html.H5("SHAP Feature Importance & Impact", className="mt-4 mb-2 text-secondary"),
         html.P("This plot shows how much each feature contributes to the model's predictions. Dots to the right increase the prediction, left decrease. Color often indicates feature value (red=high, blue=low).", className="small text-muted"),
-        html.Img(src=shap_beeswarm_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src else dbc.Alert("SHAP plot could not be generated (often due to small dataset size or model type). Basic Feature Importance plot might be available below.", color="warning", className="mt-2")
+        html.Img(src=shap_beeswarm_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src else dbc.Alert("SHAP plot could not be generated (often due to small dataset size or model type). See Basic Feature Importance or other model-specific plots below.", color="info", className="mt-2")
     ], className="mb-4 text-center")
     
     basic_importance_plot_display = html.Div([
-        html.H5("Basic Feature Importance", className="mt-4 mb-2 text-secondary"),
-        html.P("This plot shows simpler feature importances derived directly from the model (e.g., coefficients or tree-based importances).", className="small text-muted"),
-        dcc.Graph(id='basic-feature-importance-plot', figure=basic_feat_imp_fig if basic_feat_imp_fig else go.Figure(layout=go.Layout(title="Basic Feature Importance not available.")))
+        html.H5("Basic Feature Importance / Coefficients", className="mt-4 mb-2 text-secondary"),
+        html.P("This plot shows feature importances (e.g., from tree models) or absolute coefficient values (for linear models) derived directly from the best model.", className="small text-muted"),
+        dcc.Graph(id='basic-feature-importance-plot', figure=basic_feat_imp_fig if basic_feat_imp_fig and basic_feat_imp_fig.data else go.Figure(layout=go.Layout(title=f"Basic Feature Importance / Coefficients not applicable for {best_model_name} or error in generation.")))
     ], className="mb-4")
+
+    decision_tree_specific_plot_display = html.Div()
+    if decision_tree_specific_plot_src and best_model_name == "DecisionTreeRegressor":
+        decision_tree_specific_plot_display = html.Div([
+            html.H5(f"Best Model: {best_model_name} Structure", className="mt-4 mb-2 text-secondary"),
+            html.P("This visual shows the learned decision rules of the tree. It is pruned to max_depth=5 for readability.", className="small text-muted"),
+            html.Img(src=decision_tree_specific_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px', 'backgroundColor':'white', 'padding':'10px'})
+        ], className="mb-4 text-center")
+    elif not decision_tree_specific_plot_src and best_model_name == "DecisionTreeRegressor":
+         decision_tree_specific_plot_display = dbc.Alert(f"Could not render the decision tree structure for {best_model_name}. The tree might be too simple (e.g. root only), too complex, or an internal plotting error occurred.", color="info", className="mt-2")
 
 
     results_layout = html.Div([
@@ -1309,12 +1480,10 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         kpi_cards, 
         model_comparison_table_component, 
         best_model_details_card,
-        dbc.Row([
-            dbc.Col(dcc.Graph(id='actual-vs-predicted-plot', figure=actual_vs_pred_fig if actual_vs_pred_fig else go.Figure()), md=6),
-            dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot', figure=resid_fig if resid_fig else go.Figure()), md=6)
-        ], className="mb-4"),
+        diagnostic_plots_row, 
         shap_plot_display,
-        basic_importance_plot_display
+        basic_importance_plot_display,
+        decision_tree_specific_plot_display
     ])
 
     cleaned_best_model_info = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_dict.items() if k != 'Pipeline'}
@@ -1326,13 +1495,14 @@ def run_exploration_analysis_callback(n_clicks, raw_data_json, column_roles):
         'actual_vs_predicted_fig': actual_vs_pred_fig.to_json() if actual_vs_pred_fig and isinstance(actual_vs_pred_fig, go.Figure) else None,
         'residuals_vs_predicted_fig': resid_fig.to_json() if resid_fig and isinstance(resid_fig, go.Figure) else None,
         'shap_beeswarm_plot_src': shap_beeswarm_plot_src,
-        'basic_feature_importance_fig': basic_feat_imp_fig.to_json() if basic_feat_imp_fig and isinstance(basic_feat_imp_fig, go.Figure) else None
+        'basic_feature_importance_fig': basic_feat_imp_fig.to_json() if basic_feat_imp_fig and isinstance(basic_feat_imp_fig, go.Figure) else None,
+        'decision_tree_specific_plot_src': decision_tree_specific_plot_src 
     }
     return results_layout, results_data_for_store, False, current_step_text_for_store, True, _captured_progress_steps_list, _captured_current_idx, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
 @app.callback(
     [Output("model-explanation-modal", "is_open"), Output("modal-model-name", "children"), Output("modal-model-desc", "children")],
-    [Input({'type': 'details-button', 'index': ALL}, 'n_clicks'), # Updated to use pattern-matching if you add buttons dynamically
+    [Input({'type': 'details-button', 'index': ALL}, 'n_clicks'), 
      Input('model-comparison-table', 'active_cell'), 
      Input('surrogate-candidates-table', 'active_cell'), 
      Input("close-model-modal", "n_clicks")],
@@ -1354,7 +1524,6 @@ def toggle_model_explanation_modal(details_clicks, active_cell_expl, active_cell
     if triggered_prop_id == "close-model-modal.n_clicks":
         return False, dash.no_update, dash.no_update
 
-    # Check active_cell from DataTable first
     if "model-comparison-table.active_cell" in triggered_prop_id and active_cell_expl:
         if active_cell_expl['column_id'] == 'Details_action' and expl_table_data and active_cell_expl['row'] < len(expl_table_data): 
             model_name_to_show = expl_table_data[active_cell_expl['row']]['Model']
@@ -1398,7 +1567,7 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
     initial_progress_steps_opt.append(f"Preprocessing Data...")
     initial_progress_steps_opt.extend([f"Training {model['name']} ({i+1}/{len(MODELS_TO_EVALUATE)})" for i, model in enumerate(MODELS_TO_EVALUATE)])
     initial_progress_steps_opt.extend([
-        "Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances...",
+        "Evaluating Best Model...", "Calculating SHAP Values for Best Model...", "Generating Basic Feature Importances...", "Generating Model-Specific Visualizations...", 
         "Generating Surrogate Tree...", "Optimizing (Grid Search over Parameter Space)...", 
         "Evaluating Optimal Settings...", "Generating Optimization Visualizations...", "Finalizing Results..."
     ])
@@ -1428,7 +1597,8 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         all_model_results_opt, best_model_info_opt_dict, importances_opt, shap_beeswarm_plot_src_opt, \
         final_progress_steps_from_pipeline_opt, optimal_settings, predicted_target, \
         predicted_target_lower, predicted_target_upper, response_fig, surrogate_tree_text, \
-        model_info_opt_summary, surrogate_tree_plot_src, actual_vs_pred_fig_opt, resid_fig_opt, basic_feat_imp_fig_opt = \
+        model_info_opt_summary, surrogate_tree_plot_src, actual_vs_pred_fig_opt, resid_fig_opt, basic_feat_imp_fig_opt, \
+        decision_tree_specific_plot_src_opt = \
             run_optimization_automl(df, target_column, feature_columns, opt_goal, feature_ranges_from_data, missing_strategy, _progress_updater_local_opt)
         
         _captured_progress_steps_list_opt = list(final_progress_steps_from_pipeline_opt)
@@ -1459,7 +1629,7 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         html.Small(f"95% CI: {predicted_target_lower:.3f} - {predicted_target_upper:.3f}" if not np.isnan(predicted_target_lower) and not np.isnan(predicted_target_upper) else "CI N/A", className="text-muted")
     ])), width=12, lg=6, className="mb-2 align-self-stretch")
 
-    surrogate_model_name = model_info_opt_summary.get('Model Type', 'N/A')
+    surrogate_model_name = model_info_opt_summary.get('Model Type', 'N/A') 
     surrogate_hyperparam_defs = model_info_opt_summary.get('Hyperparameter_Definitions', {})
     surrogate_hyperparam_expl_div = [html.H6(f"Key Hyperparameters for Surrogate Model ({surrogate_model_name}):", className="mt-3 mb-2")]
     
@@ -1514,31 +1684,57 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
                               ]),
     ], className="mb-4")
 
-    surrogate_tree_plot_layout = html.Div()
+    surrogate_tree_plot_layout = html.Div() 
     if surrogate_tree_plot_src:
         surrogate_tree_plot_layout = html.Div([
             html.H5("Visual Surrogate Decision Tree (Simplified Logic)", className="mt-4 mb-2 text-secondary"),
-            html.P("This tree approximates the surrogate model's behavior for easier interpretation. It shows key decision paths based on transformed features.", className="small text-muted"),
+            html.P("This tree (max_depth=3) approximates the chosen surrogate model's behavior for easier interpretation. It shows key decision paths based on transformed features.", className="small text-muted"),
             html.Img(src=surrogate_tree_plot_src, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px', 'backgroundColor': 'white', 'padding':'10px', 'display':'block', 'marginLeft':'auto', 'marginRight':'auto'})
         ], className="mb-4 text-center")
-    else:
-        surrogate_tree_plot_layout = html.Div([
+    elif surrogate_tree_text: 
+         surrogate_tree_plot_layout = html.Div([
             html.H5("Surrogate Tree Logic (Textual)", className="mt-4 mb-2 text-secondary"),
-            html.P("A visual plot of the surrogate tree could not be generated. This can happen if the tree is very simple (e.g., few splits due to the data or max_depth constraint) or due to rendering complexities with many features. The textual rules below, based on transformed features, still provide insight into the model's logic:", className="small text-muted"),
-            dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text if surrogate_tree_text else "Tree text not available.", style={'whiteSpace': 'pre-wrap', 'maxHeight': '200px', 'overflowY':'auto', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px'})), className="mb-4")
+            html.P("A visual plot of the simplified surrogate tree (max_depth=3) could not be generated or was too simple. The textual rules below provide insight:", className="small text-muted"),
+            dbc.Card(dbc.CardBody(html.Pre(surrogate_tree_text, style={'whiteSpace': 'pre-wrap', 'maxHeight': '200px', 'overflowY':'auto', 'backgroundColor': '#f8f9fa', 'border': '1px solid #eee', 'padding': '10px'})), className="mb-4")
         ])
+    else: 
+        surrogate_tree_plot_layout = dbc.Alert("Simplified surrogate decision tree (max_depth=3) could not be generated.", color="info", className="mt-2")
+
         
     shap_plot_opt_display = html.Div([
-        html.H5("SHAP Feature Importance & Impact (Surrogate Model)", className="mt-4 mb-2 text-secondary"),
+        html.H5(f"SHAP Feature Importance & Impact (Surrogate Model: {surrogate_model_name})", className="mt-4 mb-2 text-secondary"),
         html.P("This plot shows feature impacts for the surrogate model used in optimization.", className="small text-muted"),
-        html.Img(src=shap_beeswarm_plot_src_opt, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src_opt else dbc.Alert("SHAP plot for surrogate model could not be generated (often due to small dataset size or model type). Basic Feature Importance plot might be available below.", color="warning", className="mt-2")
+        html.Img(src=shap_beeswarm_plot_src_opt, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px'}) if shap_beeswarm_plot_src_opt else dbc.Alert(f"SHAP plot for surrogate model ('{surrogate_model_name}') could not be generated. See Basic Feature Importance or other model-specific plots.", color="info", className="mt-2")
     ], className="mb-4 text-center")
 
     basic_importance_plot_opt_display = html.Div([
-        html.H5("Basic Feature Importance (Surrogate Model)", className="mt-4 mb-2 text-secondary"),
-        html.P("This plot shows simpler feature importances for the surrogate model.", className="small text-muted"),
-        dcc.Graph(id='basic-feature-importance-plot-opt', figure=basic_feat_imp_fig_opt if basic_feat_imp_fig_opt else go.Figure(layout=go.Layout(title="Basic Feature Importance not available.")))
+        html.H5(f"Basic Feature Importance / Coefficients (Surrogate Model: {surrogate_model_name})", className="mt-4 mb-2 text-secondary"),
+        html.P(f"This plot shows feature importances or absolute coefficient values for the surrogate model ('{surrogate_model_name}').", className="small text-muted"),
+        dcc.Graph(id='basic-feature-importance-plot-opt', figure=basic_feat_imp_fig_opt if basic_feat_imp_fig_opt and basic_feat_imp_fig_opt.data else go.Figure(layout=go.Layout(title=f"Basic Plot for {surrogate_model_name} not applicable or error in generation.")))
     ], className="mb-4")
+
+    decision_tree_specific_plot_opt_display = html.Div()
+    if decision_tree_specific_plot_src_opt and surrogate_model_name == "DecisionTreeRegressor":
+        decision_tree_specific_plot_opt_display = html.Div([
+            html.H5(f"Surrogate Model: {surrogate_model_name} Structure", className="mt-4 mb-2 text-secondary"),
+            html.P("This visual shows the learned decision rules of the surrogate tree. It is pruned to max_depth=5 for readability.", className="small text-muted"),
+            html.Img(src=decision_tree_specific_plot_src_opt, style={'maxWidth': '100%', 'height': 'auto', 'border': '1px solid #ddd', 'borderRadius': '5px', 'backgroundColor':'white', 'padding':'10px'})
+        ], className="mb-4 text-center")
+    elif not decision_tree_specific_plot_src_opt and surrogate_model_name == "DecisionTreeRegressor":
+        decision_tree_specific_plot_opt_display = dbc.Alert(f"Could not render the decision tree structure for surrogate model {surrogate_model_name}. The tree might be too simple, too complex, or an internal plotting error occurred.", color="info", className="mt-2")
+
+    opt_diagnostic_plots = []
+    if actual_vs_pred_fig_opt and actual_vs_pred_fig_opt.data:
+        opt_diagnostic_plots.append(dbc.Col(dcc.Graph(id='actual-vs-predicted-plot-opt', figure=actual_vs_pred_fig_opt), md=6))
+    else:
+        opt_diagnostic_plots.append(dbc.Col(dbc.Alert("Actual vs. Predicted plot (Surrogate): Test data insufficient or error.", color="warning", className="h-100 d-flex align-items-center justify-content-center"), md=6))
+
+    if resid_fig_opt and resid_fig_opt.data:
+        opt_diagnostic_plots.append(dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot-opt', figure=resid_fig_opt), md=6))
+    else:
+        opt_diagnostic_plots.append(dbc.Col(dbc.Alert("Residuals vs. Predicted plot (Surrogate): Test data insufficient or error.", color="warning", className="h-100 d-flex align-items-center justify-content-center"), md=6))
+
+    opt_diagnostic_plots_row = dbc.Row(opt_diagnostic_plots, className="mb-4")
 
 
     results_layout = html.Div([
@@ -1546,14 +1742,12 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         dbc.Row(optimal_settings_kpi_cards + [predicted_target_kpi], className="mb-3 g-3 justify-content-center"),
         surrogate_candidates_table_component,
         surrogate_model_details_card,
-        dbc.Row([
-            dbc.Col(dcc.Graph(id='actual-vs-predicted-plot-opt', figure=actual_vs_pred_fig_opt if actual_vs_pred_fig_opt else go.Figure()), md=6),
-            dbc.Col(dcc.Graph(id='residuals-vs-predicted-plot-opt', figure=resid_fig_opt if resid_fig_opt else go.Figure()), md=6)
-        ], className="mb-4"),
+        opt_diagnostic_plots_row, 
         html.Div(dcc.Graph(figure=response_fig), className="mb-3") if response_fig and response_fig.get('data') else html.P("Response surface plot not available (requires at least one varied numerical feature).", className="text-muted small text-center"),
         shap_plot_opt_display,
         basic_importance_plot_opt_display,
-        surrogate_tree_plot_layout
+        decision_tree_specific_plot_opt_display, 
+        surrogate_tree_plot_layout 
     ])
 
     cleaned_best_model_info_opt = {k: (None if isinstance(v, float) and np.isnan(v) else v) for k, v in best_model_info_opt_dict.items() if k != 'Pipeline'}
@@ -1568,12 +1762,13 @@ def run_optimization_analysis_callback(n_clicks, raw_data_json, column_roles, op
         'target_column': target_column, 'goal': opt_goal, 'feature_columns': feature_columns, 'missing_strategy': missing_strategy,
         'importances': importances_opt.to_dict('records') if not importances_opt.empty else [], 
         'model_info': cleaned_model_info_opt_summary, 
-        'surrogate_tree_text': surrogate_tree_text,
-        'surrogate_tree_plot_src': surrogate_tree_plot_src,
+        'surrogate_tree_text': surrogate_tree_text, 
+        'surrogate_tree_plot_src': surrogate_tree_plot_src, 
         'actual_vs_predicted_fig_opt': actual_vs_pred_fig_opt.to_json() if actual_vs_pred_fig_opt and isinstance(actual_vs_pred_fig_opt, go.Figure) else None,
         'residuals_vs_predicted_fig_opt': resid_fig_opt.to_json() if resid_fig_opt and isinstance(resid_fig_opt, go.Figure) else None,
         'shap_beeswarm_plot_src_opt': shap_beeswarm_plot_src_opt,
-        'basic_feature_importance_fig_opt': basic_feat_imp_fig_opt.to_json() if basic_feat_imp_fig_opt and isinstance(basic_feat_imp_fig_opt, go.Figure) else None
+        'basic_feature_importance_fig_opt': basic_feat_imp_fig_opt.to_json() if basic_feat_imp_fig_opt and isinstance(basic_feat_imp_fig_opt, go.Figure) else None,
+        'decision_tree_specific_plot_src': decision_tree_specific_plot_src_opt 
     }
     return results_layout, results_data_for_store, False, current_step_text_for_store_opt, True, _captured_progress_steps_list_opt, _captured_current_idx_opt, {'display': 'block', 'width':'fit-content', 'margin': 'auto'}
 
@@ -1586,25 +1781,21 @@ def switch_to_suggestions_tab_from_analysis(n1, n2):
     if not ctx.triggered: return dash.no_update
     return "tab-suggestions"
 
-# Assuming 'custom-llm-prompt-input' is defined elsewhere or you'll add it to the layout for Tab 3
-# For now, this callback will work but custom_prompt_value will be None if the input isn't in the active layout.
 @app.callback(Output('suggestions-content-div', 'children'), 
-              [Input('active-tab-store', 'data'),Input('btn-regenerate-llm', 'n_clicks') if 'btn-regenerate-llm' in app.layout else Input('active-tab-store', 'data')], # Adjusted for potential missing button
+              [Input('active-tab-store', 'data'),Input('btn-regenerate-llm', 'n_clicks') if 'btn-regenerate-llm' in app.layout else Input('active-tab-store', 'data')],
               [State('store-current-analysis-type', 'data'), State('store-exploration-results', 'data'),
                State('store-optimization-results', 'data'), 
-               State('custom-llm-prompt-input', 'value') if 'custom-llm-prompt-input' in app.layout else State('active-tab-store', 'data') # Adjusted for potential missing input
+               State('custom-llm-prompt-input', 'value') if 'custom-llm-prompt-input' in app.layout else State('active-tab-store', 'data')
                ], 
 )
 def render_suggestions_tab_content(active_tab_id, n_clicks_regenerate_or_tab_data, analysis_type, exploration_data, optimization_data, custom_prompt_value_or_tab_data):
     ctx = callback_context
     triggered_by_tab_switch = active_tab_id == 'tab-suggestions' and ctx.triggered and ctx.triggered[0]['prop_id'] == 'active-tab-store.data'
     
-    # Check if 'btn-regenerate-llm' exists and was the trigger
-    regenerate_button_exists = 'btn-regenerate-llm' in app.layout # You might need a more robust check
+    regenerate_button_exists = 'btn-regenerate-llm' in app.layout 
     triggered_by_button = regenerate_button_exists and ctx.triggered and ctx.triggered[0]['prop_id'] == 'btn-regenerate-llm.n_clicks'
 
     custom_prompt_value = custom_prompt_value_or_tab_data if 'custom-llm-prompt-input' in app.layout else None
-
 
     if not (triggered_by_tab_switch or triggered_by_button):
         return html.Div() 
@@ -1637,24 +1828,10 @@ def render_suggestions_tab_content(active_tab_id, n_clicks_regenerate_or_tab_dat
         print(f"Error generating AI insights: {e}\n{traceback.format_exc()}")
         return dbc.Alert(f"Error generating AI insights: {str(e)}", color="danger")
     
-    # Basic layout for suggestions tab, assuming custom prompt input and button are defined elsewhere if used
     suggestions_tab_layout = [
         html.H3(children=[html.I(className="fas fa-brain me-2"), header_text], className="mb-3 text-primary"),
-        # If you have custom prompt input and regenerate button, they would be here
-        # For example:
-        # dcc.Textarea(id='custom-llm-prompt-input', placeholder='Add specific questions or context for the AI...', className='mb-2', style={'width':'100%', 'height':'80px'}),
-        # dbc.Button("Regenerate Insights", id='btn-regenerate-llm', color='secondary', className='mb-3'),
         dcc.Markdown(llm_explanation_markdown, className="border p-3 bg-white rounded shadow-sm", style={'lineHeight': '1.7', 'fontSize': '0.95rem'})
     ]
-    # Add the custom prompt input and button if they are intended for this tab
-    # This requires them to be defined in the main app.layout or this callback's layout
-    # For simplicity, this example assumes they might be managed elsewhere or added if needed.
-    # Example:
-    # if 'custom-llm-prompt-input' not in app.layout: # A way to check if they are already in global layout
-    #     suggestions_tab_layout.insert(1, dcc.Textarea(id='custom-llm-prompt-input', placeholder='Add specific questions or context for the AI...', className='mb-2', style={'width':'100%', 'height':'80px'}))
-    # if 'btn-regenerate-llm' not in app.layout:
-    #     suggestions_tab_layout.insert(2, dbc.Button("Regenerate Insights", id='btn-regenerate-llm', color='secondary', className='mb-3'))
-
 
     return html.Div(suggestions_tab_layout, className="p-2")
 

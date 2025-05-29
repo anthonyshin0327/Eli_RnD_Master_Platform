@@ -19,3 +19,6 @@ openpyxl>=3.1.2
 
 # Prevent issues with urllib3/OpenSSL on Mac (if needed)
 urllib3>=1.26.0
+
+
+statsmodels>=0.13.5
